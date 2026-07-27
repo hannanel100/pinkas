@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>וויירפריימים · מערכת מדריכות כלה</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Suez+One&family=Assistant:wght@300;400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#EBEDF0;
+  --paper-line:#DDE1E7;
+  --ink:#101418;
+  --graphite:#6B7280;
+  --wire:#C9CDD4;
+  --wire-soft:#E4E7EB;
+  --screen:#FFFFFF;
+  --spec:#1B4F9C;
+  --r1:#A81E32;
+  --r2:#C2691A;
+  --r3:#9C8000;
+  --sheet-max:1240px;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+
+html{background:var(--paper)}
+
+body{
+  font-family:'Assistant',system-ui,sans-serif;
+  color:var(--ink);
+  line-height:1.55;
+  background-image:
+    linear-gradient(var(--paper-line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--paper-line) 1px,transparent 1px);
+  background-size:28px 28px;
+  padding:0 0 80px;
+}
+
+.sheet{max-width:var(--sheet-max);margin:0 auto;padding:0 20px}
+
+/* ---------- title block ---------- */
+.titleblock{
+  border:1.5px solid var(--ink);
+  background:var(--screen);
+  margin:28px 0 0;
+  display:grid;
+  grid-template-columns:1fr auto;
+}
+.tb-main{padding:22px 24px 20px}
+.tb-eyebrow{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:11px;letter-spacing:.14em;
+  color:var(--spec);text-transform:uppercase;
+  margin-bottom:8px;
+}
+.tb-title{
+  font-family:'Suez One',serif;
+  font-size:clamp(26px,5vw,40px);
+  line-height:1.1;letter-spacing:-.01em;
+}
+.tb-sub{color:var(--graphite);font-size:15px;margin-top:8px;max-width:52ch}
+.tb-meta{
+  border-inline-start:1.5px solid var(--ink);
+  font-family:'IBM Plex Mono',monospace;
+  font-size:11px;
+  display:grid;
+  align-content:start;
+  min-width:150px;
+}
+.tb-meta div{
+  padding:9px 14px;
+  border-bottom:1px solid var(--paper-line);
+  display:flex;justify-content:space-between;gap:14px;
+}
+.tb-meta div:last-child{border-bottom:0}
+.tb-meta span{color:var(--graphite)}
+
+/* ---------- controls ---------- */
+.controls{
+  display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  margin:16px 0 4px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;
+}
+.toggle{
+  border:1.5px solid var(--ink);background:var(--screen);
+  padding:7px 14px;cursor:pointer;
+  font-family:inherit;font-size:12px;color:var(--ink);
+}
+.toggle[aria-pressed="true"]{background:var(--ink);color:var(--screen)}
+.toggle:focus-visible{outline:3px solid var(--spec);outline-offset:2px}
+.hint{color:var(--graphite)}
+
+/* ---------- plate ---------- */
+.plate{
+  margin-top:44px;
+  border-top:1.5px solid var(--ink);
+  padding-top:22px;
+}
+.plate-head{display:flex;gap:14px;align-items:baseline;margin-bottom:22px;flex-wrap:wrap}
+.plate-num{
+  font-family:'IBM Plex Mono',monospace;
+  font-size:12px;color:var(--screen);background:var(--ink);
+  padding:3px 9px;letter-spacing:.08em;
+}
+.plate-title{font-family:'Suez One',serif;font-size:23px}
+.plate-role{color:var(--graphite);font-size:14px}
+
+.plate-body{
+  display:grid;
+  grid-template-columns:minmax(300px,364px) 1fr;
+  gap:44px;
+  align-items:start;
+}
+
+/* ---------- device ---------- */
+.device{
+  background:var(--screen);
+  border:1.5px solid var(--ink);
+  border-radius:26px;
+  padding:9px;
+  position:sticky;top:20px;
+  box-shadow:6px 6px 0 rgba(16,20,24,.07);
+}
+.statusbar{
+  display:flex;justify-content:space-between;
+  font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--graphite);padding:4px 12px 8px;
+}
+.viewport{
+  border:1px solid var(--wire);
+  border-radius:18px;
+  overflow:hidden;
+  background:var(--screen);
+}
+
+/* app chrome */
+.appbar{
+  padding:14px 16px 12px;
+  border-bottom:1px solid var(--wire-soft);
+  display:flex;justify-content:space-between;align-items:flex-start;gap:10px;
+}
+.appbar h3{font-size:20px;font-weight:700;line-height:1.2}
+.appbar .date{font-size:12px;color:var(--graphite);font-family:'IBM Plex Mono',monospace}
+.avatar{width:32px;height:32px;border-radius:50%;background:var(--wire);flex:none}
+
+.scroll{padding:14px 16px 18px;display:grid;gap:18px}
+
+.sec-label{
+  font-size:11px;font-family:'IBM Plex Mono',monospace;
+  letter-spacing:.1em;color:var(--graphite);
+  display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:8px;
+}
+
+/* risk cards — the only colour inside any screen */
+.risk{
+  border:1px solid var(--wire);
+  border-inline-start:4px solid var(--wire);
+  padding:9px 11px;margin-bottom:7px;
+  display:flex;justify-content:space-between;align-items:center;gap:8px;
+}
+.risk.r1{border-inline-start-color:var(--r1)}
+.risk.r2{border-inline-start-color:var(--r2)}
+.risk.r3{border-inline-start-color:var(--r3)}
+.risk-name{font-size:14px;font-weight:600}
+.risk-why{font-size:11.5px;color:var(--graphite);margin-top:1px}
+.risk-days{font-family:'IBM Plex Mono',monospace;font-size:11px;flex:none}
+.risk.r1 .risk-days{color:var(--r1);font-weight:500}
+.risk.r2 .risk-days{color:var(--r2)}
+.risk.r3 .risk-days{color:var(--r3)}
+
+/* generic rows */
+.row{
+  border:1px solid var(--wire);
+  padding:10px 11px;margin-bottom:7px;
+  display:flex;gap:11px;align-items:center;
+}
+.row .time{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--graphite);flex:none;width:38px}
+.row .who{font-size:14px;font-weight:600}
+.row .where{font-size:11.5px;color:var(--graphite)}
+.row .grow{flex:1;min-width:0}
+.chip-btn{
+  border:1px solid var(--wire);font-size:11px;color:var(--graphite);
+  padding:4px 9px;flex:none;
+}
+
+.summary{
+  border:1px dashed var(--wire);padding:11px;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.summary b{font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:500}
+.summary small{color:var(--graphite);font-size:11.5px;display:block}
+
+.tabbar{
+  border-top:1px solid var(--wire-soft);
+  display:grid;grid-template-columns:repeat(5,1fr);
+  text-align:center;padding:8px 0 10px;
+}
+.tabbar div{font-size:10.5px;color:var(--graphite)}
+.tabbar div.on{color:var(--ink);font-weight:700}
+.tabbar i{
+  display:block;width:17px;height:17px;margin:0 auto 4px;
+  border:1.5px solid var(--wire);border-radius:3px;
+}
+.tabbar div.on i{border-color:var(--ink)}
+
+/* bride card */
+.backbar{
+  padding:12px 16px;border-bottom:1px solid var(--wire-soft);
+  display:flex;align-items:center;gap:10px;
+}
+.backbar .arrow{font-family:'IBM Plex Mono',monospace;color:var(--graphite)}
+.backbar h3{font-size:17px;font-weight:700;flex:1}
+.count-chip{
+  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  border:1px solid var(--r1);color:var(--r1);padding:3px 8px;
+}
+.progress-wrap{padding:12px 16px;border-bottom:1px solid var(--wire-soft)}
+.progress-top{display:flex;justify-content:space-between;font-size:12px;color:var(--graphite);margin-bottom:6px}
+.progress-top b{color:var(--ink);font-family:'IBM Plex Mono',monospace;font-weight:500}
+.bar{height:5px;background:var(--wire-soft);display:flex;gap:2px}
+.bar span{flex:1;background:var(--wire-soft)}
+.bar span.fill{background:var(--ink)}
+.tabs{
+  display:flex;border-bottom:1px solid var(--wire-soft);
+  font-size:13px;
+}
+.tabs div{padding:10px 13px;color:var(--graphite)}
+.tabs div.on{color:var(--ink);font-weight:700;box-shadow:inset 0 -2px 0 var(--ink)}
+
+.tl{padding:14px 16px 18px}
+.tl-item{display:flex;gap:11px;padding-bottom:14px;position:relative}
+.tl-item::before{
+  content:"";position:absolute;
+  inset-inline-start:8px;top:19px;bottom:0;
+  width:1px;background:var(--wire);
+}
+.tl-item:last-child::before{display:none}
+.tl-dot{
+  width:17px;height:17px;border-radius:50%;flex:none;
+  border:1.5px solid var(--wire);background:var(--screen);
+  display:grid;place-items:center;font-size:9px;color:var(--graphite);
+  position:relative;z-index:1;
+}
+.tl-dot.done{background:var(--ink);border-color:var(--ink);color:var(--screen)}
+.tl-dot.next{border-color:var(--ink);border-width:2.5px}
+.tl-meta{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--graphite)}
+.tl-title{font-size:13.5px;font-weight:600;margin-top:1px}
+.tl-item.dim .tl-title{font-weight:400;color:var(--graphite)}
+.tl-item.cancelled .tl-title{text-decoration:line-through;color:var(--graphite)}
+.carry{
+  border:1px solid var(--ink);
+  padding:7px 9px;margin-top:7px;font-size:11.5px;
+  display:flex;gap:7px;align-items:flex-start;
+}
+.carry b{font-weight:700}
+.cta{
+  margin:2px 16px 16px;background:var(--ink);color:var(--screen);
+  text-align:center;padding:12px;font-size:14px;font-weight:600;
+}
+
+/* schedule proposal */
+.field{
+  border:1px solid var(--wire);padding:9px 11px;margin-bottom:7px;
+  display:flex;justify-content:space-between;align-items:center;font-size:13px;
+}
+.field span{color:var(--graphite);font-size:11.5px}
+.warn{
+  border:1px solid var(--r2);border-inline-start-width:4px;
+  padding:10px 11px;font-size:12px;
+}
+.warn b{color:var(--r2);display:block;margin-bottom:2px;font-size:12.5px}
+.slot{
+  display:flex;gap:10px;align-items:baseline;
+  padding:7px 0;border-bottom:1px solid var(--wire-soft);font-size:13px;
+}
+.slot .n{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--graphite);width:16px;flex:none}
+.slot .d{font-family:'IBM Plex Mono',monospace;font-size:12px;width:52px;flex:none}
+.slot .t{flex:1;color:var(--graphite);font-size:12px}
+.slot.skip{color:var(--graphite)}
+.slot.skip .d{text-decoration:line-through}
+.btn-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.btn-pair div{text-align:center;padding:11px;font-size:13px;font-weight:600;border:1.5px solid var(--ink)}
+.btn-pair div.primary{background:var(--ink);color:var(--screen)}
+
+/* portal */
+.portal{padding:26px 20px 22px;display:grid;gap:18px}
+.portal-hi{font-size:15px;color:var(--graphite)}
+.portal-hi b{display:block;font-size:22px;color:var(--ink);font-weight:700;margin-top:2px}
+.portal-next{border:1.5px solid var(--ink);padding:15px}
+.portal-next .lbl{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--graphite);letter-spacing:.08em}
+.portal-next .big{font-size:19px;font-weight:700;margin-top:5px}
+.portal-next .sm{font-size:13px;color:var(--graphite);margin-top:3px}
+.file{border:1px solid var(--wire);padding:10px 11px;margin-bottom:7px;font-size:13px;display:flex;gap:9px;align-items:center}
+.file i{width:14px;height:17px;border:1px solid var(--wire);flex:none;display:block}
+.portal-foot{font-size:11px;color:var(--graphite);text-align:center;border-top:1px solid var(--wire-soft);padding-top:14px}
+
+/* ---------- callouts ---------- */
+.tag{
+  position:absolute;z-index:5;
+  width:21px;height:21px;border-radius:50%;
+  background:var(--spec);color:#fff;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;
+  display:grid;place-items:center;cursor:pointer;
+  border:2px solid var(--screen);
+  transition:transform .12s ease;
+}
+.tag:hover,.tag.on{transform:scale(1.22)}
+.tag:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.notes-off .tag{display:none}
+
+.anchor{position:relative}
+
+/* ---------- notes ---------- */
+.notes{display:grid;gap:0;align-content:start}
+.note{
+  display:grid;grid-template-columns:auto 1fr;gap:14px;
+  padding:13px 14px;
+  border-bottom:1px solid var(--paper-line);
+  cursor:pointer;background:transparent;
+  text-align:start;font:inherit;color:inherit;width:100%;
+  border-inline-start:3px solid transparent;
+}
+.note:first-child{border-top:1px solid var(--paper-line)}
+.note:hover{background:rgba(27,79,156,.05)}
+.note.on{background:rgba(27,79,156,.09);border-inline-start-color:var(--spec)}
+.note:focus-visible{outline:2px solid var(--spec);outline-offset:-2px}
+.note-n{
+  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--spec);border:1.5px solid var(--spec);
+  width:22px;height:22px;display:grid;place-items:center;border-radius:50%;
+  align-self:start;margin-top:2px;
+}
+.note.on .note-n{background:var(--spec);color:#fff}
+.note-h{font-weight:700;font-size:15px}
+.note-b{font-size:13.5px;color:#3A4149;margin-top:3px}
+.note-b code{
+  font-family:'IBM Plex Mono',monospace;font-size:12px;
+  background:var(--wire-soft);padding:1px 5px;
+}
+.notes-off .notes{opacity:.35;pointer-events:none}
+
+.spec-strip{
+  margin-top:18px;padding:13px 15px;
+  border:1px solid var(--spec);
+  font-size:13px;
+}
+.spec-strip b{
+  font-family:'IBM Plex Mono',monospace;font-size:10.5px;
+  letter-spacing:.1em;color:var(--spec);display:block;margin-bottom:5px;
+}
+
+.colophon{
+  margin-top:52px;border-top:1.5px solid var(--ink);padding-top:18px;
+  display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--graphite);
+}
+
+@media(max-width:860px){
+  .plate-body{grid-template-columns:1fr;gap:26px}
+  .device{position:static;max-width:364px;margin:0 auto}
+  .titleblock{grid-template-columns:1fr}
+  .tb-meta{border-inline-start:0;border-top:1.5px solid var(--ink)}
+}
+@media(prefers-reduced-motion:reduce){
+  *{transition:none!important}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <div class="titleblock">
+    <div class="tb-main">
+      <div class="tb-eyebrow">גיליון וויירפריימים · מובייל 375px</div>
+      <h1 class="tb-title">מערכת ניהול<br>למדריכות כלה</h1>
+      <p class="tb-sub">ארבעה מסכים בסדר החשיבות שלהם. אפור בכל מקום — צבע רק במקום אחד: דירוג הסיכון. זו לא בחירה גרפית, זו הצהרה על מה שהמוצר מוכר.</p>
+    </div>
+    <div class="tb-meta">
+      <div><span>גיליון</span>1 / 1</div>
+      <div><span>גרסה</span>0.1</div>
+      <div><span>תאריך</span>07.2026</div>
+      <div><span>קנ״מ</span>1:1</div>
+      <div><span>מסכים</span>4</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="toggle" id="notesToggle" aria-pressed="true">הערות: מוצגות</button>
+    <span class="hint">לחיצה על מספר תסמן את ההערה המתאימה</span>
+  </div>
+
+  <!-- ============ PLATE 01 ============ -->
+  <section class="plate">
+    <div class="plate-head">
+      <span class="plate-num">01</span>
+      <h2 class="plate-title">היום</h2>
+      <span class="plate-role">מסך בית · המסך היחיד שייפתח כל בוקר</span>
+    </div>
+    <div class="plate-body">
+      <div class="anchor">
+        <div class="device">
+          <div class="statusbar"><span>9:41</span><span>▮▮▮ ◗</span></div>
+          <div class="viewport">
+            <div class="appbar">
+              <div>
+                <h3>היום</h3>
+                <div class="date">יום א׳ · כ״ב באב</div>
+              </div>
+              <div class="avatar"></div>
+            </div>
+            <div class="scroll">
+              <div>
+                <div class="sec-label"><span>דורש תשומת לב</span><span>3</span></div>
+                <div class="risk r1">
+                  <div><div class="risk-name">נועה כהן</div><div class="risk-why">4 מפגשים נותרו · לא ייגמר בזמן</div></div>
+                  <div class="risk-days">18 יום</div>
+                </div>
+                <div class="risk r2">
+                  <div><div class="risk-name">שירה לוי</div><div class="risk-why">מפגש בוטל ולא תוזמן מחדש</div></div>
+                  <div class="risk-days">9 ימים</div>
+                </div>
+                <div class="risk r3">
+                  <div><div class="risk-name">תמר אביב</div><div class="risk-why">אין מפגש מאז 2 באב</div></div>
+                  <div class="risk-days">24 יום</div>
+                </div>
+              </div>
+              <div>
+                <div class="sec-label"><span>מפגשים היום</span><span>2</span></div>
+                <div class="row">
+                  <div class="time">17:00</div>
+                  <div class="grow"><div class="who">אביגיל פרץ</div><div class="where">מפגש 3 · אצלי</div></div>
+                  <div class="chip-btn">תזכורת</div>
+                </div>
+                <div class="row">
+                  <div class="time">20:30</div>
+                  <div class="grow"><div class="who">רחלי מזרחי</div><div class="where">מפגש 7 · זום</div></div>
+                  <div class="chip-btn">תזכורת</div>
+                </div>
+              </div>
+              <div class="summary">
+                <div><b>₪2,400</b><small>3 כלות · תשלום פתוח</small></div>
+                <div class="chip-btn">פירוט</div>
+              </div>
+            </div>
+            <div class="tabbar">
+              <div class="on"><i></i>היום</div>
+              <div><i></i>כלות</div>
+              <div><i></i>יומן</div>
+              <div><i></i>מערכים</div>
+              <div><i></i>עוד</div>
+            </div>
+          </div>
+        </div>
+        <button class="tag" data-ref="a1" style="top:96px;inset-inline-start:-11px">1</button>
+        <button class="tag" data-ref="a2" style="top:180px;inset-inline-start:-11px">2</button>
+        <button class="tag" data-ref="a3" style="top:300px;inset-inline-start:-11px">3</button>
+        <button class="tag" data-ref="a4" style="top:400px;inset-inline-start:-11px">4</button>
+        <button class="tag" data-ref="a5" style="top:472px;inset-inline-start:-11px">5</button>
+      </div>
+
+      <div class="notes">
+        <button class="note" data-ref="a1"><span class="note-n">1</span><span>
+          <span class="note-h">סיכון פותח, לא יומן</span>
+          <span class="note-b">כל CRM פותח בלוח שנה. כאן הסיכון עולה מעל המפגשים — כי מפגש היום היא ממילא זוכרת, וכלה שתיתקע היא לא.</span>
+        </span></button>
+        <button class="note" data-ref="a2"><span class="note-n">2</span><span>
+          <span class="note-h">הצבע היחיד במוצר</span>
+          <span class="note-b">שלוש רמות סיכון בלבד. אם יופיע צבע במקום נוסף — הוא יאבד את המשמעות. זו מגבלה שכדאי לאכוף בטוקנים, לא בביקורת עיצוב.</span>
+        </span></button>
+        <button class="note" data-ref="a3"><span class="note-n">3</span><span>
+          <span class="note-h">״למה״ ולא רק ״מה״</span>
+          <span class="note-b">כל שורת סיכון מסבירה את עצמה במשפט. ״18 יום״ לבד הוא מספר. ״4 מפגשים נותרו · לא ייגמר בזמן״ הוא החלטה.</span>
+        </span></button>
+        <button class="note" data-ref="a4"><span class="note-n">4</span><span>
+          <span class="note-h">תזכורת בלחיצה אחת</span>
+          <span class="note-b">פותח וואטסאפ עם טקסט מוכן מתבנית. הפעולה הנפוצה ביותר במוצר חייבת להיות הרדודה ביותר — בלי מסך ביניים.</span>
+        </span></button>
+        <button class="note" data-ref="a5"><span class="note-n">5</span><span>
+          <span class="note-h">כסף כסיכום, לא כרשימה</span>
+          <span class="note-b">מספר אחד ופירוט בלחיצה. כספים הם דאגה שבועית, לא יומית — הם לא מרוויחים מקום בגלילה הראשונה.</span>
+        </span></button>
+      </div>
+    </div>
+    <div class="spec-strip">
+      <b>מצב ריק</b>
+      אין כלות בסיכון → ״הכל בזמן. 2 מפגשים היום.״ לא איור, לא ברכה. משפט אחד שמאשר שהמערכת בדקה.
+    </div>
+  </section>
+
+  <!-- ============ PLATE 02 ============ -->
+  <section class="plate">
+    <div class="plate-head">
+      <span class="plate-num">02</span>
+      <h2 class="plate-title">כרטיס כלה</h2>
+      <span class="plate-role">80% מזמן השימוש · המסך שנפתח לפני כל מפגש</span>
+    </div>
+    <div class="plate-body">
+      <div class="anchor">
+        <div class="device">
+          <div class="statusbar"><span>16:52</span><span>▮▮▮ ◗</span></div>
+          <div class="viewport">
+            <div class="backbar">
+              <span class="arrow">→</span>
+              <h3>נועה כהן</h3>
+              <span class="count-chip">18 יום</span>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-top"><span>התקדמות במסלול</span><b>4 / 8</b></div>
+              <div class="bar">
+                <span class="fill"></span><span class="fill"></span><span class="fill"></span><span class="fill"></span>
+                <span></span><span></span><span></span><span></span>
+              </div>
+            </div>
+            <div class="tabs">
+              <div class="on">מפגשים</div><div>פרטים</div><div>תשלומים</div><div>הודעות</div>
+            </div>
+            <div class="tl">
+              <div class="tl-item">
+                <div class="tl-dot done">✓</div>
+                <div class="grow">
+                  <div class="tl-meta">מפגש 4 · 12.07</div>
+                  <div class="tl-title">הפסק טהרה ובדיקות</div>
+                  <div class="carry">
+                    <b>לחזור על:</b><span>הבחנה בין בדיקה לכתם — לא היה ברור</span>
+                  </div>
+                </div>
+              </div>
+              <div class="tl-item cancelled">
+                <div class="tl-dot">✕</div>
+                <div class="grow">
+                  <div class="tl-meta">מפגש 5 · 19.07 · בוטל</div>
+                  <div class="tl-title">שבעה נקיים</div>
+                </div>
+              </div>
+              <div class="tl-item">
+                <div class="tl-dot next"></div>
+                <div class="grow">
+                  <div class="tl-meta">מפגש 5 · מחר 20:00</div>
+                  <div class="tl-title">שבעה נקיים</div>
+                </div>
+              </div>
+              <div class="tl-item dim">
+                <div class="tl-dot"></div>
+                <div class="grow">
+                  <div class="tl-meta">מפגש 6 · 02.08</div>
+                  <div class="tl-title">טבילה</div>
+                </div>
+              </div>
+              <div class="tl-item dim">
+                <div class="tl-dot"></div>
+                <div class="grow">
+                  <div class="tl-meta">מפגש 7 · טרם נקבע</div>
+                  <div class="tl-title">הרחקות</div>
+                </div>
+              </div>
+            </div>
+            <div class="cta">סמן מפגש כבוצע</div>
+          </div>
+        </div>
+        <button class="tag" data-ref="b1" style="top:52px;inset-inline-start:-11px">1</button>
+        <button class="tag" data-ref="b2" style="top:112px;inset-inline-start:-11px">2</button>
+        <button class="tag" data-ref="b3" style="top:225px;inset-inline-start:-11px">3</button>
+        <button class="tag" data-ref="b4" style="top:300px;inset-inline-start:-11px">4</button>
+        <button class="tag" data-ref="b5" style="top:365px;inset-inline-start:-11px">5</button>
+        <button class="tag" data-ref="b6" style="top:512px;inset-inline-start:-11px">6</button>
+      </div>
+
+      <div class="notes">
+        <button class="note" data-ref="b1"><span class="note-n">1</span><span>
+          <span class="note-h">הספירה לאחור צמודה לשם</span>
+          <span class="note-b">״18 יום״ ולא ״4 באלול״. תאריך דורש חישוב; ימים לא. הצבע נגזר מרמת הסיכון של אותה כלה — עקבי עם מסך 01.</span>
+        </span></button>
+        <button class="note" data-ref="b2"><span class="note-n">2</span><span>
+          <span class="note-h">4/8 בשמונה מקטעים</span>
+          <span class="note-b">לא פס רציף. המקטעים סופרים מפגשים — היחידה שהמדריכה באמת חושבת בה.</span>
+        </span></button>
+        <button class="note" data-ref="b3"><span class="note-n">3</span><span>
+          <span class="note-h">״לחזור על״ צף למעלה</span>
+          <span class="note-b">הפיצ׳ר שהופך רישום לכלי עבודה. היא פותחת את הכרטיס דקה לפני המפגש — זה מה שהיא צריכה לראות. שמור ב-<code>needs_review_note</code>.</span>
+        </span></button>
+        <button class="note" data-ref="b4"><span class="note-n">4</span><span>
+          <span class="note-h">ביטול נשאר בציר</span>
+          <span class="note-b">מפגש שבוטל לא נמחק. הוא מסביר למה המסלול נדחק ולמה הכלה בסיכון — זו היסטוריה, לא רעש.</span>
+        </span></button>
+        <button class="note" data-ref="b5"><span class="note-n">5</span><span>
+          <span class="note-h">״טרם נקבע״ הוא מצב לגיטימי</span>
+          <span class="note-b">המערכת לא מכריחה לתזמן הכל מראש. אבל מפגש לא מתוזמן קרוב לדדליין מייצר סיכון במסך 01.</span>
+        </span></button>
+        <button class="note" data-ref="b6"><span class="note-n">6</span><span>
+          <span class="note-h">פעולה אחת, לא תפריט</span>
+          <span class="note-b">בכל רגע יש דבר אחד סביר לעשות. הכפתור משנה את הטקסט לפי ההקשר: ״תזמן מפגש 7״ אחרי הסימון.</span>
+        </span></button>
+      </div>
+    </div>
+    <div class="spec-strip">
+      <b>הפרדה מבנית</b>
+      כל מה שבמסך הזה יושב ב-<code>session_record</code> ולא נגיש לכלה לעולם. הכלה רואה רק תאריך, שעה ומיקום — טבלה אחרת, לא הרשאה על שדה.
+    </div>
+  </section>
+
+  <!-- ============ PLATE 03 ============ -->
+  <section class="plate">
+    <div class="plate-head">
+      <span class="plate-num">03</span>
+      <h2 class="plate-title">מסלול מוצע</h2>
+      <span class="plate-role">מנוע התזמון ההפוך · הפיצ׳ר שמצדיק את המוצר</span>
+    </div>
+    <div class="plate-body">
+      <div class="anchor">
+        <div class="device">
+          <div class="statusbar"><span>21:04</span><span>▮▮▮ ◗</span></div>
+          <div class="viewport">
+            <div class="backbar">
+              <span class="arrow">→</span>
+              <h3>מסלול חדש · נועה כהן</h3>
+            </div>
+            <div class="scroll">
+              <div>
+                <div class="field">מערך<span>בסיסי · 8 מפגשים</span></div>
+                <div class="field">תאריך חתונה<span>י״ד באלול · 27.08</span></div>
+                <div class="field">תדירות<span>אחת לשבוע</span></div>
+                <div class="field">מרווח ביטחון<span>14 יום</span></div>
+              </div>
+              <div class="warn">
+                <b>צפוף מדי</b>
+                8 מפגשים שבועיים דורשים 8 שבועות. עד הדדליין נותרו 6. הצעה: שני מפגשים בשבוע בשבועיים הראשונים.
+              </div>
+              <div>
+                <div class="sec-label"><span>לוז מוצע</span><span>ניתן לעריכה</span></div>
+                <div class="slot"><span class="n">1</span><span class="d">21.07</span><span class="t">פתיחה והיכרות</span></div>
+                <div class="slot"><span class="n">2</span><span class="d">24.07</span><span class="t">יסודות</span></div>
+                <div class="slot skip"><span class="n">—</span><span class="d">28.07</span><span class="t">דולג · תשעה באב</span></div>
+                <div class="slot"><span class="n">3</span><span class="d">31.07</span><span class="t">הרחקות</span></div>
+                <div class="slot"><span class="n">4</span><span class="d">04.08</span><span class="t">בדיקות</span></div>
+                <div class="slot"><span class="n">5</span><span class="d">11.08</span><span class="t">שבעה נקיים</span></div>
+                <div class="btn-pair">
+                  <div class="primary">אשר לוז</div>
+                  <div>ערוך ידנית</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button class="tag" data-ref="c1" style="top:118px;inset-inline-start:-11px">1</button>
+        <button class="tag" data-ref="c2" style="top:222px;inset-inline-start:-11px">2</button>
+        <button class="tag" data-ref="c3" style="top:330px;inset-inline-start:-11px">3</button>
+        <button class="tag" data-ref="c4" style="top:452px;inset-inline-start:-11px">4</button>
+      </div>
+
+      <div class="notes">
+        <button class="note" data-ref="c1"><span class="note-n">1</span><span>
+          <span class="note-h">מרווח הביטחון גלוי וניתן לשינוי</span>
+          <span class="note-b">המפגש האחרון צריך להסתיים לפני הטבילה, לא לפני החופה. יש הבדלי מנהג — המערכת לא קובעת, היא שואלת פעם אחת ומאמצת.</span>
+        </span></button>
+        <button class="note" data-ref="c2"><span class="note-n">2</span><span>
+          <span class="note-h">האזהרה מגיעה עם פתרון</span>
+          <span class="note-b">״צפוף מדי״ לבד היא תלונה. ״הצעה: שני מפגשים בשבוע״ היא עזרה. אזהרה בלי מוצא היא באג מוצרי.</span>
+        </span></button>
+        <button class="note" data-ref="c3"><span class="note-n">3</span><span>
+          <span class="note-h">דילוגים מוצגים, לא מוסתרים</span>
+          <span class="note-b">שבתות, צומות וחגים נדלגים אוטומטית — אבל השורה נשארת ומסבירה. אחרת היא תחשוב שהמערכת טעתה.</span>
+        </span></button>
+        <button class="note" data-ref="c4"><span class="note-n">4</span><span>
+          <span class="note-h">״ערוך ידנית״ שווה במשקל</span>
+          <span class="note-b">האלגוריתם מציע, לא מחליט. מדריכה ותיקה יודעת דברים על הכלה הזו שהמערכת לא — והיא תנטוש מוצר שמתווכח איתה.</span>
+        </span></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PLATE 04 ============ -->
+  <section class="plate">
+    <div class="plate-head">
+      <span class="plate-num">04</span>
+      <h2 class="plate-title">פורטל כלה</h2>
+      <span class="plate-role">2–5 כניסות בסך הכל · מוצר אחר לגמרי</span>
+    </div>
+    <div class="plate-body">
+      <div class="anchor">
+        <div class="device">
+          <div class="statusbar"><span>22:17</span><span>▮▮▮ ◗</span></div>
+          <div class="viewport">
+            <div class="portal">
+              <div class="portal-hi">היי<b>נועה</b></div>
+              <div class="portal-next">
+                <div class="lbl">המפגש הבא</div>
+                <div class="big">מחר · 20:00</div>
+                <div class="sm">אצל מיכל · הרצל 14, פתח תקווה</div>
+              </div>
+              <div>
+                <div class="sec-label"><span>חומרים</span></div>
+                <div class="file"><i></i>לוח הפסק טהרה</div>
+                <div class="file"><i></i>רשימת מקוואות באזור</div>
+              </div>
+              <div class="btn-pair">
+                <div>שלחי הודעה למיכל</div>
+                <div>הוסיפי ליומן</div>
+              </div>
+              <div class="portal-foot">הקישור פעיל עד 10.09</div>
+            </div>
+          </div>
+        </div>
+        <button class="tag" data-ref="d1" style="top:60px;inset-inline-start:-11px">1</button>
+        <button class="tag" data-ref="d2" style="top:150px;inset-inline-start:-11px">2</button>
+        <button class="tag" data-ref="d3" style="top:300px;inset-inline-start:-11px">3</button>
+        <button class="tag" data-ref="d4" style="top:410px;inset-inline-start:-11px">4</button>
+      </div>
+
+      <div class="notes">
+        <button class="note" data-ref="d1"><span class="note-n">1</span><span>
+          <span class="note-h">אין ניווט, אין תפריט, אין לוגו</span>
+          <span class="note-b">היא לא ״משתמשת במערכת״. היא בודקת מתי המפגש. כל אלמנט נוסף הוא חיכוך על מישהי שממילא לחוצה.</span>
+        </span></button>
+        <button class="note" data-ref="d2"><span class="note-n">2</span><span>
+          <span class="note-h">שאלה אחת, תשובה אחת</span>
+          <span class="note-b">״מתי ואיפה״ תופס חצי מסך. אין תצוגת מסלול, אין רשימת נושאים — אלה לא שלה.</span>
+        </span></button>
+        <button class="note" data-ref="d3"><span class="note-n">3</span><span>
+          <span class="note-h">דיסקרטיות כדרישה</span>
+          <span class="note-b">שם ניטרלי בכותרת הדפדפן, בלי preview בהתראות, בלי מונחים מזהים במטא-דאטה. הטלפון שלה לא תמיד פרטי.</span>
+        </span></button>
+        <button class="note" data-ref="d4"><span class="note-n">4</span><span>
+          <span class="note-h">תפוגה מוצהרת</span>
+          <span class="note-b">Magic link בלי סיסמה, שנסגר אחרי החתונה. התאריך גלוי — זו הבטחה, לא הגבלה.</span>
+        </span></button>
+      </div>
+    </div>
+  </section>
+
+  <div class="colophon">
+    <span>מערכת ניהול למדריכות כלה · גיליון וויירפריימים 0.1</span>
+    <span>4 מסכים · 19 הערות · יולי 2026</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  var tags = Array.prototype.slice.call(document.querySelectorAll('.tag'));
+  var notes = Array.prototype.slice.call(document.querySelectorAll('.note'));
+  var all = tags.concat(notes);
+
+  function select(ref){
+    var already = document.querySelector('.note.on[data-ref="'+ref+'"]');
+    all.forEach(function(el){ el.classList.remove('on'); });
+    if(already) return;
+    all.forEach(function(el){
+      if(el.getAttribute('data-ref') === ref) el.classList.add('on');
+    });
+  }
+
+  all.forEach(function(el){
+    el.addEventListener('click', function(){
+      select(el.getAttribute('data-ref'));
+    });
+  });
+
+  var btn = document.getElementById('notesToggle');
+  btn.addEventListener('click', function(){
+    var on = btn.getAttribute('aria-pressed') === 'true';
+    btn.setAttribute('aria-pressed', String(!on));
+    btn.textContent = on ? 'הערות: מוסתרות' : 'הערות: מוצגות';
+    document.body.classList.toggle('notes-off', on);
+  });
+})();
+</script>
+</body>
+</html>
