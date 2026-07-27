@@ -724,6 +724,8 @@ PRD §14 lists it first: *can the product team read the notes? An explicit decis
 
 This needs a decision from the product owner, not from this document. It is recorded here so it cannot be reached by default.
 
+**Decision (2026-07-27, product owner): yes — currently the product team may read notes.** This supersedes the recommendation above for now. Two consequences still bind: the in-product privacy policy must say so in plain Hebrew (§11.4 — an honest "yes" costs less trust than a discovered "no"), and every support read must land in `access_log` with `actor_kind = 'support'`, so the policy can later be tightened to break-glass without a schema change. The word *currently* is deliberate: this is to be revisited before public launch.
+
 ### 16.3 Client-side note encryption — considered, deferred
 
 PRD §10.1 raises it and names the trade: *sells excellent trust, breaks search — a conscious decision.*
@@ -834,11 +836,11 @@ The strategic option — groom instructors, bar mitzvah teachers, couples counse
 
 Four places the design deliberately does not do what was asked, plus the questions that remain open.
 
-### 20.1 The premise is still unvalidated
+### 20.1 The premise — validated (2026-07-27)
 
-PRD §15 is explicit that the core assumption — *the central pain is the deadline, not organisation* — has not been tested, and prescribes 8–10 depth interviews before any code.
+PRD §15 was explicit that the core assumption — *the central pain is the deadline, not organisation* — had not been tested, and prescribed 8–10 depth interviews before any code.
 
-**That should happen before Phase 1 is built.** This document does not change that; it makes the interviews cheaper by making the consequences concrete. If the interviews say the real pain is billing or content, §7 and §8 are the wrong core and most of this document is wrong with them. The parts that survive regardless are §3–§6 and §16: schema, isolation, and privacy are needed by any version of this product.
+**Resolved (2026-07-27, product owner): the premise is validated.** The deadline is confirmed as the core pain, with one qualification: organisation and the ability to share materials with the bride matter too. That qualification does not change the core (§7 and §8 stand); it confirms that the material-sharing path (§3.7, the bride portal in §5–§6) belongs in Phase 1 rather than being a candidate for cutting.
 
 ### 20.2 D4 is only partially satisfiable
 
@@ -848,15 +850,17 @@ PRD §15 is explicit that the core assumption — *the central pain is the deadl
 
 PRD §10.1 lists it among encryption and RLS. It is not that class of control: it gates the UI, not the data, and the session token remains on the device. It is worth building for the stated reason (she hands the phone to her children), but it should not be represented to users as protecting their data from a lost phone. §6.1.
 
-### 20.4 The team-access question blocks the first commit
+### 20.4 The team-access question blocks the first commit — resolved
 
 §16.2. The PRD asks it; this document recommends an answer and a mechanism; someone must actually decide. It is listed here rather than in a backlog because the honest answer changes what gets built — publishing "no one can read your notes" while support tooling can is worse than never claiming it.
+
+**Resolved (2026-07-27): yes, currently — see the decision in §16.2.** Development is no longer blocked; what remains is publishing the policy honestly and revisiting it before public launch.
 
 ### 20.5 Open questions carried forward
 
 | PRD §14 question | Phase-1 default | Where |
 |---|---|---|
-| Can the product team read notes? | No, break-glass only — **needs owner sign-off** | §16.2 |
+| Can the product team read notes? | **Resolved 2026-07-27: yes, currently** — reads logged in `access_log`; revisit before public launch | §16.2 |
 | What is the right buffer before the wedding? | 14 days, editable, remembered per instructor | §7.2 |
 | Should the bride see topics, or only dates? | Dates only; a change means a new view, never a wider one | §5.3 |
 | What happens to data after completion? | Archive indefinitely; explicit bulk delete offered | §16.4 |

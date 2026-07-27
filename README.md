@@ -4,7 +4,7 @@ A management system for independent bride instructors (מדריכות כלה) �
 
 The product is built around a **hard deadline** — the wedding date — rather than around a calendar. That is what separates it from a generic CRM, and it is the organising idea behind most of the design decisions in these documents.
 
-> **Status: design only.** No application code exists yet. The PRD's own next step (§15) is 8–10 depth interviews with working instructors to validate the core premise before development begins.
+> **Status: design complete, validated.** No application code exists yet, but the core premise has been validated and the pre-code decisions are made (see below) — development can begin.
 
 ## Documents
 
@@ -31,9 +31,9 @@ psql -d pinkas_test -v ON_ERROR_STOP=1 \
 
 A non-zero exit means the isolation design has regressed. This belongs in CI from the first commit.
 
-## Before writing application code
+## Pre-code decisions — resolved 2026-07-27
 
-Two things are unresolved and both are called out in the design:
+The two blockers the design called out have been decided by the product owner:
 
-1. **Can the product team read instructors' private notes?** The PRD asks for an explicit decision before the first line of code. SDD §16.2 recommends an answer and a mechanism; someone still has to decide.
-2. **The core premise is unvalidated** — that the central pain is the deadline rather than organisation. SDD §20.1.
+1. **Can the product team read instructors' private notes?** Yes, currently. Support reads must be logged in `access_log`, the policy must be published honestly in-product, and the decision is to be revisited before public launch. SDD §16.2.
+2. **The core premise is validated** — the central pain is the deadline. Qualification: organisation and sharing materials with the bride matter too, which confirms the material-sharing path and bride portal belong in Phase 1. SDD §20.1.
