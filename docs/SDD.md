@@ -93,7 +93,54 @@ Per PRD §5, and unchanged: teams/multiple instructors per account, a shared cur
 
 Rejected alternatives are recorded in [ADR-0001](./adr/0001-nextjs-supabase.md).
 
-### 2.2 The three access paths
+### 2.2 The system on one page
+
+```mermaid
+flowchart TB
+    subgraph clients["Clients"]
+        IB["Instructor PWA<br/>Next.js App Router · RTL · offline outbox"]
+        BB["Bride browser<br/>/p/[token] — no account, no install"]
+    end
+
+    subgraph vercel["Vercel — Next.js server"]
+        SA["Server Actions +<br/>Route Handlers"]
+        DOM["lib/domain — PURE<br/>scheduling · risk · hebrew-calendar · templates"]
+        DATA["lib/data — the chokepoint<br/>every instructor read/write, + access_log"]
+        POR["lib/data/portal.ts<br/>the only service-role module"]
+    end
+
+    subgraph supa["Supabase"]
+        PG[("Postgres 16<br/>RLS on every tenant table<br/>v_course_risk · portal_session_view")]
+        AUTH["Auth — phone OTP"]
+        ST["Storage — private buckets"]
+        CRON["pg_cron — nightly risk job"]
+    end
+
+    WA["WhatsApp<br/>wa.me deep link"]
+
+    IB -->|"user JWT"| SA
+    IB -->|"OTP"| AUTH
+    IB -->|"one tap, pre-composed"| WA
+    BB -.->|"opaque token, hashed on arrival"| POR
+
+    SA --> DOM
+    SA --> DATA
+
+    DATA -->|"client carrying the user's JWT<br/>RLS: tenant_id = auth.uid&#40;&#41;"| PG
+    DATA -->|"signed URLs, per request"| ST
+    POR -.->|"service role + explicit bride_id filter<br/>portal_session_view only"| PG
+    POR -.-> ST
+    CRON --> PG
+    AUTH -.->|"auth.users.id = instructor.id"| PG
+```
+
+Three things in that picture are load-bearing, and each is enforced somewhere rather than merely intended:
+
+* **`lib/data/` is the only door to the database** for instructor traffic (§13). Nothing in `clients` holds a Supabase client for bride data, which is what makes the access log complete.
+* **`lib/domain/` has no edge to anything.** The two engines are pure functions called by the server layer; they never reach the database, which is what makes §17.2's fixture tests possible and is enforced as a lint error.
+* **The dashed edges are the untrusted path.** They originate at a browser with no account and terminate at exactly one view and one bucket prefix. The service-role key exists nowhere else.
+
+### 2.3 The three access paths
 
 The whole security design follows from there being exactly three ways data is reached, with different trust levels. Nothing else may talk to the database.
 
@@ -124,7 +171,7 @@ Two rules make this hold, and both are testable:
 1. **The browser never holds a Supabase client for bride data.** All reads go through `lib/data/` (§13). This is not a style preference — the access log in PRD §10.1 cannot otherwise be written correctly.
 2. **The service-role key is confined to Path 2 and Path 3.** It never appears in a code path that accepts arbitrary user input; the only untrusted input it ever sees is a portal token, which is hashed before use.
 
-### 2.3 Module layout
+### 2.4 Module layout
 
 ```
 app/
@@ -284,7 +331,7 @@ The product's central promise, stated in PRD §4.2 and §7.3.ב and repeated in 
 |---|---|---|
 | Reads | every table, RLS-scoped | `portal_session_view` + shared `material` rows |
 | Sees | `private_note`, `needs_review_note`, `covered_topic_ids` | date, time, duration, location, session number, status |
-| Path | Path 1 (§2.2) | Path 2 (§2.2) |
+| Path | Path 1 (§2.3) | Path 2 (§2.3) |
 
 `portal_session_view` exposes exactly seven columns:
 
