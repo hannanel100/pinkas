@@ -61,6 +61,43 @@ psql -d pinkas_test -v ON_ERROR_STOP=1 \
 
 A non-zero exit means the isolation design has regressed. Run this after any schema change.
 
+## Agents
+
+Seven project agents in [`.claude/agents/`](.claude/agents/), one per surface the design treats as
+separately enforced. Each carries the judgement calls and known traps for its own area; the
+invariants above bind all of them.
+
+| Agent | Owns | |
+|---|---|---|
+| `frontend` | `app/`, `components/`, the theme, RTL, accessibility, PWA shell | read/write |
+| `backend` | `lib/data/`, `lib/supabase/`, Server Actions, auth, the access log | read/write |
+| `database` | migrations, RLS policies, views, indexes, `schema.test.sql` | read/write |
+| `domain` | `lib/domain/` — the pure scheduling and risk engines | read/write |
+| `qa` | tests across all four layers, the CI harness | read/write |
+| `docs` | SDD, PRD, ADRs, story traceability | read/write |
+| `security` | tenant isolation, PII, tokens, leak review | **read-only** |
+
+`security` has no write tools by design. It reports findings and the owning agent fixes them —
+that separation is what stops a review from quietly becoming a refactor, and it keeps the reviewer
+honest about severity when it cannot simply patch what it finds.
+
+The split between `backend` and `database` is not organisational tidiness: in this repo the schema
+*is* the security boundary (invariants 1, 2, 5), so a one-line migration can carry more consequence
+than a large feature, and it should be written and reviewed as such.
+
+## Tickets
+
+Tickets are GitHub Issues, and **every ticket names its owning agent before work starts** — routing
+is a judgement about which invariants the work touches, and that is cheapest while the work is
+still being described. Use `/ticket` to draft, route, dispatch or list; it carries the workflow and
+the routing tables, including a story-by-story map in
+[`references/routing.md`](.claude/skills/ticket/references/routing.md).
+
+The agent lives in an **Agent** field in the issue body and is mirrored to an `agent:<name>` label
+by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml). The sync runs body →
+label, so **change the agent by editing the body** — a label-only edit is reverted on the next one.
+One-time setup for a fresh clone: `./scripts/setup-agent-labels.sh`.
+
 ## Working conventions
 
 - **The SDD is the source of truth for the *how*; the PRD for the *what*.** When code and document disagree, one of them is a bug — decide which, and fix it rather than letting them drift. `schema.sql` explains itself, so the SDD deliberately does not restate the DDL.

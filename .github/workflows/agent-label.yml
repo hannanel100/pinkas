@@ -1,0 +1,56 @@
+name: Sync agent label
+
+# Keeps the `agent:*` label in step with the Agent field in the issue body, so a ticket is
+# routable whether it was opened from the issue form, the gh CLI, or the /ticket skill.
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const AGENTS = ['frontend', 'backend', 'security', 'database', 'domain', 'qa', 'docs'];
+            const body = context.payload.issue.body || '';
+
+            // Matches the issue-form rendering ("### Agent\n\nfrontend") and the plain
+            // convention the /ticket skill writes ("**Agent:** `frontend`").
+            const match =
+              body.match(/#+\s*Agent\s*\n+\s*`?([a-z]+)`?/i) ||
+              body.match(/\*\*Agent:?\*\*\s*:?\s*`?([a-z]+)`?/i);
+
+            const agent = match && AGENTS.includes(match[1].toLowerCase())
+              ? match[1].toLowerCase()
+              : null;
+
+            const issue_number = context.payload.issue.number;
+            const { owner, repo } = context.repo;
+            const desired = agent ? `agent:${agent}` : null;
+
+            const current = context.payload.issue.labels
+              .map(l => l.name)
+              .filter(n => n.startsWith('agent:'));
+
+            for (const name of current) {
+              if (name !== desired) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name })
+                  .catch(() => {});
+              }
+            }
+
+            if (desired && !current.includes(desired)) {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number, labels: [desired],
+              });
+            }
+
+            if (!agent) {
+              core.notice('No agent field found in the issue body; no agent:* label applied.');
+            }
