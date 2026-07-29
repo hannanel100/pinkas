@@ -87,37 +87,16 @@ than a large feature, and it should be written and reviewed as such.
 
 ## Tickets
 
-Tickets are GitHub Issues, and **every ticket names its owning agent before work starts.** Routing
-is a judgement about which invariants the work touches, and that is cheapest to make while the work
-is still being described — not when someone picks it up.
+Tickets are GitHub Issues, and **every ticket names its owning agent before work starts** — routing
+is a judgement about which invariants the work touches, and that is cheapest while the work is
+still being described. Use `/ticket` to draft, route, dispatch or list; it carries the workflow and
+the routing tables, including a story-by-story map in
+[`references/routing.md`](.claude/skills/ticket/references/routing.md).
 
-```
-/ticket new <description>   draft and open a ticket with an agent attached
-/ticket route <n>           set or change the agent on an existing ticket
-/ticket run <n>             dispatch the ticket to its attached agent
-/ticket list [agent]        show open tickets, flagging unrouted ones
-```
-
-The agent is recorded in two places, kept in step automatically:
-
-- an **Agent** field in the issue body — the [issue form](.github/ISSUE_TEMPLATE/task.yml) dropdown,
-  or an `**Agent:**` line naming the agent, when the issue is opened from the CLI;
-- an `agent:<name>` label, applied by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml)
-  on issue open and edit.
-
-The workflow syncs the label *from* the body, so change the agent by editing the body — editing
-only the label will be reverted on the next edit. Routing guidance, including a story-by-story
-table, is in [`.claude/skills/ticket/references/routing.md`](.claude/skills/ticket/references/routing.md).
-
+The agent lives in an **Agent** field in the issue body and is mirrored to an `agent:<name>` label
+by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml). The sync runs body →
+label, so **change the agent by editing the body** — a label-only edit is reverted on the next one.
 One-time setup for a fresh clone: `./scripts/setup-agent-labels.sh`.
-
-Conventions worth holding to:
-
-- **One agent per ticket.** If two own equal weight, that is two tickets with a blocking
-  relationship — usually the `lib/data/` function first, then the screen that consumes it.
-- **Anything that changes what the bride portal can reach gets a `security` review alongside**,
-  however small the diff.
-- **Engine changes ship with their fixture rows** in the same ticket, not a follow-up `qa` one.
 
 ## Working conventions
 
