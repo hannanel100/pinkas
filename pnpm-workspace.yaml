@@ -1,0 +1,11 @@
+# pnpm settings. Not a monorepo — this file exists because pnpm 10+ reads its
+# configuration from here rather than from package.json.
+#
+# An install script is arbitrary code execution at `pnpm install` time, so pnpm
+# blocks them by default and each one is allowlisted deliberately. Adding an
+# entry here is a reviewable act, not an incidental one — SDD §16.1,
+# "Dependencies: lockfile, automated advisories, minimal third-party JS".
+allowBuilds:
+  esbuild: true # vitest's bundler
+  sharp: true # next/image optimisation
+  unrs-resolver: true # eslint-import-resolver-typescript

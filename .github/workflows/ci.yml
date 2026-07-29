@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # SDD §17.1 — "This belongs in CI from the first commit." A non-zero exit here
+  # means the isolation design has regressed, which is a release blocker, not a
+  # test failure to triage later.
+  schema:
+    name: Schema isolation suite
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pinkas_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolation and risk-tier assertions
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pinkas_test
+        run: ./scripts/test-schema.sh "$DATABASE_URL"
+
+  app:
+    name: Lint, typecheck, unit tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The lint step is not a style gate. It is where invariants 3, 4, 5, 7 and
+      # 8 are enforced — see eslint.config.mjs. A failure here is a design
+      # regression, and the fix is almost never an eslint-disable.
+      - name: Lint (invariant enforcement)
+        run: pnpm run lint
+
+      # Runs TypeScript 7's native tsc. typescript-eslint above still resolves
+      # the 6.x API via the `typescript` alias — see README.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
