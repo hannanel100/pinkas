@@ -1,7 +1,7 @@
 # ADR-0006 — All bride data access goes through the server
 
 **Status:** Accepted · July 2026
-**Relates to:** SDD §2.2, §13
+**Relates to:** SDD §2.3, §13
 
 ## Context
 
