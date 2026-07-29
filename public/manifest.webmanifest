@@ -1,0 +1,14 @@
+{
+  "name": "פנקס",
+  "short_name": "פנקס",
+  "description": "ניהול מפגשים",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "/today",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EBEDF0",
+  "theme_color": "#EBEDF0",
+  "icons": []
+}

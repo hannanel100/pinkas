@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/*
+ * SDD §10 — the design system, expressed as a closed token set.
+ *
+ * Invariant 7: colour carries exactly one meaning, and that meaning is risk.
+ * Tailwind's entire default palette is therefore removed with `--color-*:
+ * initial` before anything is defined. This is the enforcement mechanism the
+ * SDD asks for: a developer reaching for `bg-blue-500` finds that no such
+ * utility exists. Adding an accent colour means editing this file, which is a
+ * visible, reviewable act rather than an inline convenience.
+ *
+ * The wireframe sheet's blue (#1B4F9C) is annotation chrome, not a product
+ * token, and must not be added here — SDD §10.2.
+ */
+@theme {
+  --color-*: initial;
+
+  /* Kept because they are not colours in the design sense. */
+  --color-transparent: transparent;
+  --color-current: currentColor;
+
+  /* Neutrals — SDD §10.1, taken verbatim from the sheet. */
+  --color-paper: #ebedf0;
+  --color-paper-line: #dde1e7;
+  --color-ink: #101418;
+  --color-graphite: #6b7280;
+  --color-wire: #c9cdd4;
+  --color-wire-soft: #e4e7eb;
+  --color-screen: #ffffff;
+
+  /*
+   * The only chromatic tokens in the system. Only `components/risk/` may
+   * reference them — enforced by eslint.config.mjs.
+   *
+   * Verbatim from the sheet, per SDD §10.1. Note that risk-2 (3.94:1) and
+   * risk-3 (3.82:1) do not meet WCAG AA at the 11px `.risk-days` size that
+   * §18.2 requires — tracked in issue #5. Do not adjust these values here:
+   * §18.2's remedy is a design decision that lands with the SDD token table.
+   */
+  --color-risk-1: #a81e32;
+  --color-risk-2: #c2691a;
+  --color-risk-3: #9c8000;
+
+  /* Typography — SDD §10.3. Three families, each with one job. */
+  --font-*: initial;
+  --font-title: var(--font-suez-one), Georgia, serif;
+  --font-sans: var(--font-assistant), system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+  }
+
+  body {
+    font-family: var(--font-sans);
+  }
+
+  /* SDD §18.2 — focus must stay visible; the token set has no colour to spare,
+     so the ring is ink. */
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}
