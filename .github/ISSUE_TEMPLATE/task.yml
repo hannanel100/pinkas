@@ -1,0 +1,73 @@
+name: Task
+description: A vertical slice of work, with the agent that will own it
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      description: >-
+        Which agent owns this ticket. Picked up front so the ticket is dispatchable without
+        re-reading it. `agent:<value>` is applied as a label automatically. Choose `unassigned`
+        only if the slice genuinely spans layers and needs splitting first.
+      options:
+        - frontend
+        - backend
+        - security
+        - database
+        - domain
+        - qa
+        - docs
+        - unassigned
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: AFK can be implemented and merged without human interaction. HITL needs a decision or a design review.
+      options:
+        - AFK
+        - HITL
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What to build
+      description: >-
+        The end-to-end behaviour of this slice, not a layer-by-layer implementation. Avoid file
+        paths and code snippets — they go stale. Exception: a type shape or schema that encodes a
+        decision more precisely than prose can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants in play
+      description: >-
+        Which of CLAUDE.md's numbered invariants this slice touches, if any. The owning agent is
+        bound by all of them, but naming them here tells a reviewer where to look first.
+      placeholder: "2 (private notes physically separated), 5 (service-role containment)"
+
+  - type: textarea
+    id: blocked
+    attributes:
+      label: Blocked by
+      value: "None - can start immediately"
+    validations:
+      required: true

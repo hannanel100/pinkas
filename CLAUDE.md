@@ -61,6 +61,64 @@ psql -d pinkas_test -v ON_ERROR_STOP=1 \
 
 A non-zero exit means the isolation design has regressed. Run this after any schema change.
 
+## Agents
+
+Seven project agents in [`.claude/agents/`](.claude/agents/), one per surface the design treats as
+separately enforced. Each carries the judgement calls and known traps for its own area; the
+invariants above bind all of them.
+
+| Agent | Owns | |
+|---|---|---|
+| `frontend` | `app/`, `components/`, the theme, RTL, accessibility, PWA shell | read/write |
+| `backend` | `lib/data/`, `lib/supabase/`, Server Actions, auth, the access log | read/write |
+| `database` | migrations, RLS policies, views, indexes, `schema.test.sql` | read/write |
+| `domain` | `lib/domain/` — the pure scheduling and risk engines | read/write |
+| `qa` | tests across all four layers, the CI harness | read/write |
+| `docs` | SDD, PRD, ADRs, story traceability | read/write |
+| `security` | tenant isolation, PII, tokens, leak review | **read-only** |
+
+`security` has no write tools by design. It reports findings and the owning agent fixes them —
+that separation is what stops a review from quietly becoming a refactor, and it keeps the reviewer
+honest about severity when it cannot simply patch what it finds.
+
+The split between `backend` and `database` is not organisational tidiness: in this repo the schema
+*is* the security boundary (invariants 1, 2, 5), so a one-line migration can carry more consequence
+than a large feature, and it should be written and reviewed as such.
+
+## Tickets
+
+Tickets are GitHub Issues, and **every ticket names its owning agent before work starts.** Routing
+is a judgement about which invariants the work touches, and that is cheapest to make while the work
+is still being described — not when someone picks it up.
+
+```
+/ticket new <description>   draft and open a ticket with an agent attached
+/ticket route <n>           set or change the agent on an existing ticket
+/ticket run <n>             dispatch the ticket to its attached agent
+/ticket list [agent]        show open tickets, flagging unrouted ones
+```
+
+The agent is recorded in two places, kept in step automatically:
+
+- an **Agent** field in the issue body — the [issue form](.github/ISSUE_TEMPLATE/task.yml) dropdown,
+  or a `**Agent:** \`<name>\`` line when opened from the CLI;
+- an `agent:<name>` label, applied by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml)
+  on issue open and edit.
+
+The workflow syncs the label *from* the body, so change the agent by editing the body — editing
+only the label will be reverted on the next edit. Routing guidance, including a story-by-story
+table, is in [`.claude/skills/ticket/references/routing.md`](.claude/skills/ticket/references/routing.md).
+
+One-time setup for a fresh clone: `./scripts/setup-agent-labels.sh`.
+
+Conventions worth holding to:
+
+- **One agent per ticket.** If two own equal weight, that is two tickets with a blocking
+  relationship — usually the `lib/data/` function first, then the screen that consumes it.
+- **Anything that changes what the bride portal can reach gets a `security` review alongside**,
+  however small the diff.
+- **Engine changes ship with their fixture rows** in the same ticket, not a follow-up `qa` one.
+
 ## Working conventions
 
 - **The SDD is the source of truth for the *how*; the PRD for the *what*.** When code and document disagree, one of them is a bug — decide which, and fix it rather than letting them drift. `schema.sql` explains itself, so the SDD deliberately does not restate the DDL.
