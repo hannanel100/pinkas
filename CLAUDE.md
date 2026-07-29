@@ -101,7 +101,7 @@ is still being described — not when someone picks it up.
 The agent is recorded in two places, kept in step automatically:
 
 - an **Agent** field in the issue body — the [issue form](.github/ISSUE_TEMPLATE/task.yml) dropdown,
-  or a `**Agent:** \`<name>\`` line when opened from the CLI;
+  or an `**Agent:**` line naming the agent, when the issue is opened from the CLI;
 - an `agent:<name>` label, applied by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml)
   on issue open and edit.
 
