@@ -792,7 +792,7 @@ Amendment 13 to the Israeli Privacy Protection Law imposes obligations that plau
 
 ### 16.6 Data residency
 
-**The Supabase projects (production and staging) run in `eu-central-1` (Frankfurt).** Decided 2026-07-30 under #27; pending product-owner sign-off, because it binds the privacy policy, not just a latency number.
+**The Supabase projects (production and staging) run in `eu-central-1` (Frankfurt).** Decided 2026-07-30 under #27 and signed off by the product owner the same day — a product decision, because it binds the privacy policy, not just a latency number.
 
 Where this database physically sits is a privacy decision (PRD §10.1): it holds names, phone numbers, wedding dates and intimate notes. Supabase offers no Israeli region, so the data leaves Israel whichever region is chosen; the choice is which jurisdiction it lands in.
 

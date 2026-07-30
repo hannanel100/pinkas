@@ -8,7 +8,7 @@ and hard to get wrong. Progress is tracked on issue #27, not here.
 
 | Decision | Choice | Reasoned where |
 |---|---|---|
-| Region | `eu-central-1` (Frankfurt), both projects | SDD §16.6 — **pending product-owner sign-off** |
+| Region | `eu-central-1` (Frankfurt), both projects | SDD §16.6 — signed off by the product owner 2026-07-30 |
 | One project or two | Two: `pinkas-prod` and `pinkas-staging`; staging stood up first, production deferred to Phase B | below |
 | Who applies migrations | A named human via `pnpm exec supabase db push`; CI holds no db credential | [migrations.md](./migrations.md) |
 | OTP provider | Twilio Verify through Supabase phone auth | below |
@@ -57,7 +57,7 @@ this matrix is the contract it implements.
 
 ## OTP provider
 
-**Recommendation: Twilio Verify**, wired through Supabase Auth native phone
+**Decision (signed off by the product owner 2026-07-30): Twilio Verify**, wired through Supabase Auth native phone
 provider support.
 
 * Supabase-native integration — no custom SMS hook to write or operate.
@@ -66,10 +66,11 @@ provider support.
 * Verify manages code lifecycle and per-number verification limits (default:
   5 check attempts per code) instead of us storing codes.
 
-Shortlist alternatives, both also Supabase-supported, if Twilio compliance
-checks stall: **Vonage**, **MessageBird**. The decision can change until #10
-starts; the reason to pick now is external lead time — provider identity and
-business verification can take days and blocks signup (#10).
+Fallbacks, both also Supabase-supported, if Twilio compliance checks stall:
+**Vonage**, **MessageBird** — switching would reopen the signed-off decision
+with the product owner. The reason the choice was made early is external lead
+time: provider identity and business verification can take days and blocks
+signup (#10).
 
 Rate limits to configure (Supabase Dashboard, Auth section):
 
