@@ -17,7 +17,9 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const AGENTS = ['frontend', 'backend', 'security', 'database', 'domain', 'qa', 'docs'];
+            // Keep in step with .claude/agents/ and scripts/setup-agent-labels.sh. The capture
+            // below is [a-z]+, so an agent name cannot contain a hyphen.
+            const AGENTS = ['frontend', 'backend', 'security', 'database', 'domain', 'qa', 'docs', 'infra'];
             const body = context.payload.issue.body || '';
 
             // Matches the issue-form rendering ("### Agent\n\nfrontend") and the plain
