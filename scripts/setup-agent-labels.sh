@@ -24,6 +24,7 @@ create "agent:database" "5319E7" "Schema, migrations, RLS policies, views, schem
 create "agent:domain"   "FBCA04" "Pure engines — scheduling, risk, hebrew-calendar, templates"
 create "agent:qa"       "006B75" "Tests across all four layers, CI harness"
 create "agent:docs"     "C5DEF5" "SDD, PRD, ADRs, traceability"
+create "agent:infra"    "5C5C5C" "Provisioning, deploys, env matrix, migration delivery"
 
 echo
 echo "Done. Attach one to a ticket with:  gh issue edit <n> --add-label agent:<name>"

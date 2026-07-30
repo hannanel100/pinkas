@@ -63,9 +63,9 @@ A non-zero exit means the isolation design has regressed. Run this after any sch
 
 ## Agents
 
-Seven project agents in [`.claude/agents/`](.claude/agents/), one per surface the design treats as
-separately enforced. Each carries the judgement calls and known traps for its own area; the
-invariants above bind all of them.
+Nine project agents in [`.claude/agents/`](.claude/agents/) — one per surface the design treats as
+separately enforced, plus one that owns no surface at all. Each carries the judgement calls and
+known traps for its own area; the invariants above bind all of them.
 
 | Agent | Owns | |
 |---|---|---|
@@ -74,16 +74,32 @@ invariants above bind all of them.
 | `database` | migrations, RLS policies, views, indexes, `schema.test.sql` | read/write |
 | `domain` | `lib/domain/` — the pure scheduling and risk engines | read/write |
 | `qa` | tests across all four layers, the CI harness | read/write |
+| `infra` | provisioning, deploys, the environment matrix, migration delivery | read/write |
 | `docs` | SDD, PRD, ADRs, story traceability | read/write |
 | `security` | tenant isolation, PII, tokens, leak review | **read-only** |
+| `challenger` | design alternatives to a proposed approach, pre-implementation | **read-only** |
 
 `security` has no write tools by design. It reports findings and the owning agent fixes them —
 that separation is what stops a review from quietly becoming a refactor, and it keeps the reviewer
 honest about severity when it cannot simply patch what it finds.
 
+`challenger` is read-only for the same reason, and additionally owns no tickets: it exists to argue
+that a better design was available *before* the owning agent implements, in a two-round exchange
+capped by construction. A ticket opts in with `**Challenge:** yes` at draft time — the ten
+invariants and the ADRs are out of bounds, the challenger is allowed to concede, and an exchange
+that settles a genuinely contested decision terminates in an ADR rather than a transcript. The
+flow lives in `/ticket challenge`.
+
 The split between `backend` and `database` is not organisational tidiness: in this repo the schema
 *is* the security boundary (invariants 1, 2, 5), so a one-line migration can carry more consequence
 than a large feature, and it should be written and reviewed as such.
+
+`infra` exists for the same reason, one step further out. Invariant 5 is a lint rule inside the
+codebase and nothing at all outside it: in a hosting provider's settings panel the service-role key
+is a string in a text field, and a preview deployment is public by default. The environment is
+therefore the weakest point in the isolation design, and it deserves an owner rather than being
+whoever happened to be deploying. The line against `qa` is what the work is *for* — `qa` proves the
+code correct, `infra` delivers correct code to production, and `ci.yml` stays with `qa`.
 
 ## Tickets
 
@@ -97,6 +113,11 @@ The agent lives in an **Agent** field in the issue body and is mirrored to an `a
 by [`.github/workflows/agent-label.yml`](.github/workflows/agent-label.yml). The sync runs body →
 label, so **change the agent by editing the body** — a label-only edit is reverted on the next one.
 One-time setup for a fresh clone: `./scripts/setup-agent-labels.sh`.
+
+A ticket whose approach is genuinely contested — more than one defensible design — carries
+`**Challenge:** yes`, which makes `/ticket run` put the owner's proposed approach through the
+`challenger` exchange before any code is written. Mark it at draft time, like routing and for the
+same reason.
 
 ## Working conventions
 

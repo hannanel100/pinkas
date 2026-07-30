@@ -12,6 +12,7 @@ most code. If two agents own equal weight, split the ticket.
 | `supabase/migrations/`, `docs/schema*.sql`, a table, column, policy, view, index, `pg_cron` | `database` |
 | `lib/domain/` — scheduling, risk, hebrew-calendar, templates | `domain` |
 | Test coverage, fixtures, Playwright, axe, CI workflows | `qa` |
+| Vercel and Supabase project config, environment variables, `.env.example`, deploy and rollback runbooks, how a migration reaches production, DNS | `infra` |
 | `docs/SDD.md`, `docs/PRD.md`, `docs/adr/`, `README.md` | `docs` |
 | A review of existing work for leaks, RLS, PII, token handling | `security` |
 
@@ -50,3 +51,16 @@ most code. If two agents own equal weight, split the ticket.
   change belongs in the same ticket as the code, not a separate one.
 * **`security` never gets a build ticket.** It has no write tools. Route the fix to the owning
   agent and use `security` to verify.
+* **`qa` owns CI; `infra` owns everything downstream of a green build.** The dividing question is
+  what the change is *for*: proving the code correct is `qa`, delivering correct code to production
+  is `infra`. `ci.yml` stays with `qa` — splitting one file across two owners buys a handoff and
+  nothing else.
+* **A migration is two tickets when the delivery mechanism is in question.** What the migration
+  contains is `database`; how it reaches production is `infra`. Most of the time only the first
+  exists.
+* **Anything that puts the service-role key somewhere new is `infra` plus a `security` review** —
+  including an environment variable. Invariant 5 is enforced by lint inside the codebase and by
+  nobody at all outside it.
+* **`challenger` is never a routing answer.** It owns no surface and no ticket; it enters through
+  the `**Challenge:** yes` field at dispatch time. If you are tempted to route a ticket to it, what
+  you actually want is `**Challenge:** yes` on a ticket owned by someone else.
