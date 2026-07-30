@@ -758,6 +758,7 @@ PRD §10.1 is unambiguous: *the database holds names, phone numbers, wedding dat
 | Portal | Hashed tokens, expiry, rate limit, no indexing, §6.2 |
 | Backups | Provider PITR **plus a restore drill that is actually performed** — an untested backup is not a backup |
 | Dependencies | Lockfile, automated advisories, minimal third-party JS; **zero third-party scripts on portal routes** |
+| Data residency | Frankfurt (`eu-central-1`) — §16.6 |
 
 ### 16.2 The unanswered question that blocks development
 
@@ -788,6 +789,18 @@ Deferred for Phase 1, because it also breaks server-side rendering of note conte
 ### 16.5 Legal
 
 Amendment 13 to the Israeli Privacy Protection Law imposes obligations that plausibly apply here (database registration, a security officer, breach notification, DPIA). **This document is not a legal opinion and its author is not qualified to give one.** PRD §10.1 already flags the need for legal review; that review should happen before beta users hold real bride data, not before launch.
+
+### 16.6 Data residency
+
+**The Supabase projects (production and staging) run in `eu-central-1` (Frankfurt).** Decided 2026-07-30 under #27; pending product-owner sign-off, because it binds the privacy policy, not just a latency number.
+
+Where this database physically sits is a privacy decision (PRD §10.1): it holds names, phone numbers, wedding dates and intimate notes. Supabase offers no Israeli region, so the data leaves Israel whichever region is chosen; the choice is which jurisdiction it lands in.
+
+* **EU over US.** Israel holds an EU adequacy decision, so Israel↔EU transfer of personal data is legally established ground, and the Amendment-13 review (§16.5) argues more simply against an EU-hosted processor than a US-hosted one.
+* **Frankfurt over the other EU regions.** The closest major EU region to Israel (~60–80 ms), and one Vercel functions can be co-located with (`fra1` — settled in the Vercel ticket, not here). The §18.1 budget depends on that co-location: every Today-screen render crosses this link.
+* **Staging sits in the same region.** It holds fake data only, but parity keeps the residency statement one sentence and the two projects behaviourally identical.
+
+Consequences accepted: moving regions later is a database migration with downtime, not a settings change; and the in-product privacy policy must state where the data is held (§16.2 already requires that honesty).
 
 ---
 

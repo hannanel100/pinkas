@@ -8,4 +8,5 @@
 allowBuilds:
   esbuild: true # vitest's bundler
   sharp: true # next/image optimisation
+  supabase: true # Supabase CLI — postinstall fetches the platform binary; pinned so the migration path is version-stable (docs/runbooks/migrations.md)
   unrs-resolver: true # eslint-import-resolver-typescript
