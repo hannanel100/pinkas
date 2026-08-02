@@ -114,7 +114,12 @@ async function createUser(admin, email, password) {
     password,
     email_confirm: true,
   });
-  if (error) throw new Error(`createUser ${email}: ${error.message}`);
+  if (error) {
+    const detail = [error.status && `status=${error.status}`, error.code && `code=${error.code}`]
+      .filter(Boolean)
+      .join(" ");
+    throw new Error(`createUser ${email}: ${detail} ${error.message || JSON.stringify(error)}`);
+  }
   return data.user;
 }
 
@@ -130,7 +135,8 @@ async function fullSuite() {
   const runTag = Date.now();
   const emailA = `pinkas-rls-a-${runTag}@example.com`;
   const emailB = `pinkas-rls-b-${runTag}@example.com`;
-  const password = `${randomUUID()}.${randomUUID()}`;
+  // bcrypt truncates at 72 bytes and GoTrue 500s beyond it — keep under the limit
+  const password = `${randomUUID()}.${randomUUID()}`.slice(0, 64);
 
   console.log("\n== creating throwaway auth users (real auth.uid values) ==");
   const A = (await createUser(admin, emailA, password)).id;
@@ -183,17 +189,19 @@ async function fullSuite() {
       { id: ids.sessionA, tenant_id: A, course_id: ids.courseA, order_index: 1, scheduled_at: tsFromNow(1), location: "Herzl 14", status: "planned" },
       { id: ids.sessionB, tenant_id: B, course_id: ids.courseB, order_index: 1, scheduled_at: tsFromNow(2), location: "Weizmann 3", status: "planned" },
     ];
+    // Every row needs an explicit id: PostgREST unifies columns across a bulk
+    // insert, so rows missing a key get an explicit null instead of the default.
     for (let g = 1; g <= 5; g += 1) {
-      sessions.push({ tenant_id: A, course_id: ids.courseCrit, order_index: g, scheduled_at: tsFromNow(g), status: "planned" });
+      sessions.push({ id: randomUUID(), tenant_id: A, course_id: ids.courseCrit, order_index: g, scheduled_at: tsFromNow(g), status: "planned" });
     }
     sessions.push(
-      { tenant_id: A, course_id: ids.courseHigh, order_index: 1, scheduled_at: tsFromNow(-10), status: "cancelled" },
-      { tenant_id: A, course_id: ids.courseHigh, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
-      { tenant_id: A, course_id: ids.courseMed, order_index: 1, scheduled_at: tsFromNow(-30), status: "done" },
-      { tenant_id: A, course_id: ids.courseMed, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
-      { tenant_id: A, course_id: ids.courseInfo, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
-      { tenant_id: A, course_id: ids.courseNone, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
-      { tenant_id: A, course_id: ids.courseNone, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 1, scheduled_at: tsFromNow(-10), status: "cancelled" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 1, scheduled_at: tsFromNow(-30), status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseInfo, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
     );
     await seed(admin, "session", sessions);
     await seed(admin, "session_record", [
