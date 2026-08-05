@@ -6,10 +6,5 @@ export default defineConfig({
     // no clock: `today` is injected, so the fixture tables are deterministic.
     environment: "node",
     include: ["lib/**/*.test.ts"],
-
-    // lib/ is empty in the scaffold; the engines and their fixture tables are
-    // ticketed to `domain`. Remove this line once the first test lands, so an
-    // empty suite goes back to being a failure.
-    passWithNoTests: true,
   },
 });
