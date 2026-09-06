@@ -23,6 +23,21 @@
  * possible divergence and it is in the safe direction (the mirror escalates no
  * earlier than the view).
  *
+ * ── Where the mirror and the view disagree outright (#42) ──────────────────
+ *
+ * On a course with `target_end_date is null`, they do not agree at all. The
+ * view's `greatest(0, target_end_date - current_date)` yields `0` rather than
+ * null, because Postgres `greatest()` *ignores* nulls instead of propagating
+ * them — so `sessions_remaining > floor(0 / 7.0)` is true and the view ranks a
+ * course with no deadline `critical`, reporting `days_to_deadline` as `0`. This
+ * module takes the other reading: no deadline, no tier, `daysToDeadline` null.
+ *
+ * That is a real divergence, not an approximation, and #42 settles which side
+ * is right. Until it does, do not "fix" either half alone — the two readings
+ * are load-bearing in different places (§15 computes risk here when offline,
+ * §8.4's nightly job reads the view), so changing one silently makes the same
+ * course rank differently depending on which path served the screen.
+ *
  * Row selection is the caller's job, not this module's: the view restricts to
  * `course.status = 'active'` and `deleted_at is null`, and `lib/data/` applies
  * the same filter before calling here.
@@ -140,8 +155,9 @@ export function assessRisk(input: CourseRiskInput): RiskAssessment {
   const deadlineDays = daysToDeadline(input.today, input.targetEndDate);
 
   // critical — sessions remaining > whole weeks to the effective deadline.
-  // `null` deadline: SQL's comparison against null is not true, so the tier
-  // cannot fire, and the mirror must not fire either.
+  // A null deadline skips the tier: a course with no deadline cannot be failing
+  // to meet one. This is a deliberate *disagreement* with the view rather than a
+  // mirror of it — see the header and #42.
   if (deadlineDays !== null) {
     const wholeWeeks = Math.floor(deadlineDays / 7);
     if (input.sessionsRemaining > wholeWeeks) {

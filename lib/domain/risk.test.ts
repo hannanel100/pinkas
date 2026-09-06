@@ -98,7 +98,10 @@ const rows: readonly Row[] = [
     reasonCode: "wedding_approaching",
   },
   {
-    name: "not critical — no target end date, so the tier cannot fire",
+    // The view disagrees here and ranks this `critical`; #42 settles which
+    // reading is right. Asserted so the divergence is visible in the suite
+    // rather than discovered from a screen.
+    name: "not critical — no target end date (diverges from v_course_risk, #42)",
     input: course({ targetEndDate: null, sessionsRemaining: 20 }),
     level: "none",
     reasonCode: null,
