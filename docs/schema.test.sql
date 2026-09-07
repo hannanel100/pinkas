@@ -179,3 +179,255 @@ begin
 end $$;
 
 reset role;
+
+-- =============================================================
+-- BEGIN #36 — bootstrap_instructor: the signup seed is atomic
+-- Requires migration 0005_bootstrap_instructor_atomic.sql.
+-- =============================================================
+-- Tenants used below: C = c0000000-0000-4000-8000-000000000003 (clean signup),
+-- D = d0000000-0000-4000-8000-000000000004 (signup that fails partway).
+-- Written out literally rather than as psql variables: psql does not
+-- interpolate :vars inside the dollar-quoted DO blocks that follow.
+
+-- Carries ids between role switches so the cross-tenant check below can
+-- address a seeded row by primary key, not only by tenant_id.
+create temp table bootstrap36 (label text primary key, id uuid);
+grant all on bootstrap36 to authenticated;
+
+-- ---------- shape: the properties that make it safe, not just correct ----------
+do $$
+declare f pg_proc%rowtype;
+begin
+  select * into f from pg_proc
+  where oid = to_regprocedure('public.bootstrap_instructor(text,text,jsonb,text,jsonb)');
+  if f.oid is null then
+    raise exception 'FAIL: bootstrap_instructor(text,text,jsonb,text,jsonb) is missing';
+  end if;
+
+  -- security definer would bypass RLS for every row the seed writes, turning
+  -- the signup helper into a tenant-forgery primitive (invariant 1).
+  if f.prosecdef then
+    raise exception 'FAIL: bootstrap_instructor is SECURITY DEFINER';
+  end if;
+
+  -- a procedure can COMMIT mid-body; that is precisely the partial state
+  -- this ticket exists to make impossible.
+  if f.prokind <> 'f' then
+    raise exception 'FAIL: bootstrap_instructor is not a plain function (prokind=%)', f.prokind;
+  end if;
+
+  if f.proconfig is null
+     or not exists (select 1 from unnest(f.proconfig) c where c like 'search_path=%') then
+    raise exception 'FAIL: bootstrap_instructor does not pin search_path';
+  end if;
+
+  -- no instructor-id parameter: the tenant can only ever be auth.uid()
+  if exists (select 1 from unnest(f.proargnames) a
+             where a in ('p_id','p_instructor_id','p_tenant_id')) then
+    raise exception 'FAIL: bootstrap_instructor takes a caller-supplied tenant id';
+  end if;
+
+  if not has_function_privilege('authenticated', f.oid, 'execute') then
+    raise exception 'FAIL: authenticated cannot execute bootstrap_instructor';
+  end if;
+  if has_function_privilege('service_role', f.oid, 'execute') then
+    raise exception 'FAIL: service_role can execute bootstrap_instructor (invariant 5)';
+  end if;
+  if exists (select 1 from aclexplode(f.proacl) a where a.grantee = 0) then
+    raise exception 'FAIL: bootstrap_instructor is executable by PUBLIC';
+  end if;
+
+  raise notice 'PASS: bootstrap_instructor is invoker-rights, a function, search_path-pinned, granted only to authenticated';
+end $$;
+
+-- ---------- happy path, as a brand-new tenant C ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"c0000000-0000-4000-8000-000000000003"}';
+
+do $$
+declare r record; n int; ord text;
+begin
+  select * into r from public.bootstrap_instructor(
+    'Chana (tenant C)',
+    '+972500000003',
+    '[{"name":"reminder","body":"hi {{bride_name}} - {{date}} {{time}} {{location}}"},
+      {"name":"welcome","body":"welcome {{bride_name}} - {{instructor_name}}"}]'::jsonb,
+    'chana@example.test',
+    '{"name":"C starter","description":"seeded template",
+      "topics":[{"title":"Topic one","estimated_minutes":60},{"title":"Topic two"}]}'::jsonb);
+
+  if r.instructor_id <> 'c0000000-0000-4000-8000-000000000003' then
+    raise exception 'FAIL: bootstrap returned instructor_id %, expected auth.uid()', r.instructor_id;
+  end if;
+  if not r.was_created then raise exception 'FAIL: was_created false on first bootstrap'; end if;
+  if r.seeded_template_count <> 2 then
+    raise exception 'FAIL: seeded % templates, expected 2', r.seeded_template_count;
+  end if;
+  if r.seeded_curriculum_id is null then raise exception 'FAIL: no curriculum seeded'; end if;
+
+  insert into bootstrap36 values ('curriculum', r.seeded_curriculum_id);
+
+  -- every seeded row is tenant-scoped from the moment it exists (invariant 1)
+  select count(*) into n from instructor where id = auth.uid();
+  if n <> 1 then raise exception 'FAIL: instructor row not visible to its own tenant'; end if;
+
+  select count(*) into n from message_template where tenant_id = auth.uid() and is_system;
+  if n <> 2 then raise exception 'FAIL: % system templates for tenant C, expected 2', n; end if;
+
+  select count(*) into n from message_template where tenant_id = auth.uid() and not is_system;
+  if n <> 0 then raise exception 'FAIL: bootstrap seeded % non-system templates', n; end if;
+
+  select count(*) into n from curriculum where tenant_id = auth.uid();
+  if n <> 1 then raise exception 'FAIL: % curricula for tenant C, expected 1', n; end if;
+
+  select count(*) into n from curriculum where id = r.seeded_curriculum_id and default_session_count = 2;
+  if n <> 1 then raise exception 'FAIL: default_session_count was not derived from the topic count'; end if;
+
+  select string_agg(order_index::text, ',' order by order_index) into ord
+  from curriculum_topic where curriculum_id = r.seeded_curriculum_id and tenant_id = auth.uid();
+  if ord is distinct from '1,2' then
+    raise exception 'FAIL: seeded topic order_index list is %, expected 1,2', ord;
+  end if;
+
+  -- invariant 6: bootstrap seeds a *template*. A course (and its snapshot) is
+  -- created later, from it — never here.
+  select count(*) into n from course where tenant_id = auth.uid();
+  if n <> 0 then raise exception 'FAIL: bootstrap created % course rows', n; end if;
+
+  raise notice 'PASS: bootstrap seeds instructor + system templates + curriculum template, all tenant-scoped';
+end $$;
+
+-- ---------- a retry must not double-seed ----------
+do $$
+declare r record; n int;
+begin
+  select * into r from public.bootstrap_instructor(
+    'Chana again', '+972500000003',
+    '[{"name":"reminder","body":"second attempt"}]'::jsonb,
+    null,
+    '{"name":"C starter again","topics":[{"title":"Topic three"}]}'::jsonb);
+
+  if r.was_created then raise exception 'FAIL: second bootstrap reported a fresh instructor'; end if;
+  if r.seeded_template_count <> 0 then
+    raise exception 'FAIL: second bootstrap seeded % more templates', r.seeded_template_count;
+  end if;
+  if r.seeded_curriculum_id is not null then
+    raise exception 'FAIL: second bootstrap seeded another curriculum';
+  end if;
+
+  select count(*) into n from message_template where tenant_id = auth.uid();
+  if n <> 2 then raise exception 'FAIL: tenant C now has % templates, expected 2', n; end if;
+  select count(*) into n from curriculum where tenant_id = auth.uid();
+  if n <> 1 then raise exception 'FAIL: tenant C now has % curricula, expected 1', n; end if;
+  select count(*) into n from curriculum_topic where tenant_id = auth.uid();
+  if n <> 2 then raise exception 'FAIL: tenant C now has % topics, expected 2', n; end if;
+  select count(*) into n from instructor where full_name = 'Chana again';
+  if n <> 0 then raise exception 'FAIL: second bootstrap overwrote the instructor row'; end if;
+
+  raise notice 'PASS: bootstrap is idempotent - a retry seeds only what is missing';
+end $$;
+
+-- ---------- an unauthenticated caller gets nothing ----------
+set request.jwt.claims = '{}';
+do $$
+begin
+  perform * from public.bootstrap_instructor(
+    'Nobody', '+972500000000', '[{"name":"x","body":"y"}]'::jsonb);
+  raise exception 'FAIL: bootstrap ran without an authenticated caller';
+exception when sqlstate '28000' then null;
+end $$;
+
+-- ---------- tenant A cannot see anything tenant C was seeded ----------
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int;
+begin
+  select count(*) into n from curriculum
+   where id = (select id from bootstrap36 where label = 'curriculum');
+  if n <> 0 then raise exception 'FAIL: tenant A read tenant C curriculum by primary key'; end if;
+
+  select count(*) into n from curriculum
+   where tenant_id = 'c0000000-0000-4000-8000-000000000003';
+  if n <> 0 then raise exception 'FAIL: tenant A sees % of tenant C curricula', n; end if;
+
+  select count(*) into n from curriculum_topic
+   where curriculum_id = (select id from bootstrap36 where label = 'curriculum');
+  if n <> 0 then raise exception 'FAIL: tenant A sees tenant C curriculum topics'; end if;
+
+  select count(*) into n from message_template
+   where tenant_id = 'c0000000-0000-4000-8000-000000000003';
+  if n <> 0 then raise exception 'FAIL: tenant A sees tenant C message templates'; end if;
+
+  select count(*) into n from instructor
+   where id = 'c0000000-0000-4000-8000-000000000003';
+  if n <> 0 then raise exception 'FAIL: tenant A read tenant C instructor row'; end if;
+
+  raise notice 'PASS: the bootstrapped rows are invisible to another tenant, including by primary key';
+end $$;
+
+-- ---------- atomicity: a failure partway leaves nothing behind ----------
+-- estimated_minutes = 0 trips curriculum_topic's CHECK on the *last* insert
+-- the function performs, i.e. after the instructor row, the templates and the
+-- curriculum row have all been written.
+set request.jwt.claims = '{"sub":"d0000000-0000-4000-8000-000000000004"}';
+do $$
+begin
+  perform * from public.bootstrap_instructor(
+    'Dvora (tenant D)', '+972500000004',
+    '[{"name":"reminder","body":"hi {{bride_name}}"},{"name":"welcome","body":"welcome"}]'::jsonb,
+    null,
+    '{"name":"D starter","topics":[{"title":"Fine"},{"title":"Broken","estimated_minutes":0}]}'::jsonb);
+  raise exception 'FAIL: bootstrap accepted a topic violating estimated_minutes > 0';
+exception when check_violation then null;
+end $$;
+
+-- Counted as superuser: RLS must not be the reason the rows look absent.
+reset role;
+do $$
+declare n int;
+begin
+  select count(*) into n from instructor where id = 'd0000000-0000-4000-8000-000000000004';
+  if n <> 0 then raise exception 'FAIL: a failed bootstrap left an instructor row behind'; end if;
+  select count(*) into n from message_template where tenant_id = 'd0000000-0000-4000-8000-000000000004';
+  if n <> 0 then raise exception 'FAIL: a failed bootstrap left % templates behind', n; end if;
+  select count(*) into n from curriculum where tenant_id = 'd0000000-0000-4000-8000-000000000004';
+  if n <> 0 then raise exception 'FAIL: a failed bootstrap left a curriculum behind'; end if;
+  select count(*) into n from curriculum_topic where tenant_id = 'd0000000-0000-4000-8000-000000000004';
+  if n <> 0 then raise exception 'FAIL: a failed bootstrap left curriculum topics behind'; end if;
+end $$;
+
+-- The same payload with the one bad value corrected must succeed. Without
+-- this, the assertions above would also pass if the call had failed at the
+-- very first statement and proved nothing about partial state.
+set role authenticated;
+set request.jwt.claims = '{"sub":"d0000000-0000-4000-8000-000000000004"}';
+do $$
+declare r record;
+begin
+  select * into r from public.bootstrap_instructor(
+    'Dvora (tenant D)', '+972500000004',
+    '[{"name":"reminder","body":"hi {{bride_name}}"},{"name":"welcome","body":"welcome"}]'::jsonb,
+    null,
+    '{"name":"D starter","topics":[{"title":"Fine"},{"title":"Fixed","estimated_minutes":45}]}'::jsonb);
+  if not r.was_created then
+    raise exception 'FAIL: the rolled-back bootstrap had left an instructor row after all';
+  end if;
+  if r.seeded_template_count <> 2 or r.seeded_curriculum_id is null then
+    raise exception 'FAIL: the corrected payload did not seed the full account';
+  end if;
+end $$;
+
+reset role;
+do $$
+declare n int;
+begin
+  select count(*) into n from curriculum_topic
+   where tenant_id = 'd0000000-0000-4000-8000-000000000004';
+  if n <> 2 then raise exception 'FAIL: tenant D has % topics after a clean bootstrap, expected 2', n; end if;
+  raise notice 'PASS: a bootstrap that fails partway leaves no instructor, template, curriculum or topic behind';
+end $$;
+
+drop table bootstrap36;
+-- =============================================================
+-- END #36
+-- =============================================================
