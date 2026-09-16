@@ -182,7 +182,7 @@ reset role;
 
 -- =============================================================
 -- BEGIN #36 — bootstrap_instructor: the signup seed is atomic
--- Requires migration 0005_bootstrap_instructor_atomic.sql.
+-- Requires migration 0002_bootstrap_instructor_atomic.sql.
 -- =============================================================
 -- Tenants used below: C = c0000000-0000-4000-8000-000000000003 (clean signup),
 -- D = d0000000-0000-4000-8000-000000000004 (signup that fails partway).
@@ -232,6 +232,9 @@ begin
   end if;
   if has_function_privilege('service_role', f.oid, 'execute') then
     raise exception 'FAIL: service_role can execute bootstrap_instructor (invariant 5)';
+  end if;
+  if has_function_privilege('anon', f.oid, 'execute') then
+    raise exception 'FAIL: anon can execute bootstrap_instructor';
   end if;
   if exists (select 1 from aclexplode(f.proacl) a where a.grantee = 0) then
     raise exception 'FAIL: bootstrap_instructor is executable by PUBLIC';

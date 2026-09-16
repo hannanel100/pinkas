@@ -1,5 +1,5 @@
 -- =============================================================
--- 0005 — bootstrap_instructor: make the signup transaction atomic
+-- 0002 — bootstrap_instructor: make the signup transaction atomic
 -- Issue #36. Relates to SDD §6.1 (instructor auth), §14.2 (templates),
 -- §4 (RLS), ADR-0002, ADR-0004.
 --
@@ -207,5 +207,10 @@ comment on function public.bootstrap_instructor(text, text, jsonb, text, jsonb) 
 -- Execute is granted to the signed-in instructor and to nobody else.
 -- Notably NOT to service_role: invariant 5 confines the service-role key to
 -- the bride portal read path, which has no business creating instructors.
-revoke execute on function public.bootstrap_instructor(text, text, jsonb, text, jsonb) from public;
+--
+-- Revoking from PUBLIC is not enough on a live project. Supabase's default
+-- privileges grant EXECUTE on every new function in `public` directly to
+-- anon, authenticated and service_role, so those grants must be revoked by
+-- name or the function stays callable by both (#31).
+revoke execute on function public.bootstrap_instructor(text, text, jsonb, text, jsonb) from public, anon, service_role;
 grant  execute on function public.bootstrap_instructor(text, text, jsonb, text, jsonb) to authenticated;
