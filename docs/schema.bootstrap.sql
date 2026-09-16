@@ -1,6 +1,9 @@
 -- Emulates the parts of Supabase the schema depends on, so the DDL and the
 -- RLS policies can be exercised against vanilla Postgres exactly as written.
 do $$ begin
+  if not exists (select 1 from pg_roles where rolname='anon') then
+    create role anon nologin;
+  end if;
   if not exists (select 1 from pg_roles where rolname='authenticated') then
     create role authenticated nologin;
   end if;
