@@ -61,6 +61,19 @@ request() {
   } | curl -sS -K - -o "$out" -w '%{http_code} %{content_type}\n' --max-time 15
 }
 
+# fetch <token> <body-file> -> sets STATUS and CTYPE. An unreachable host is
+# an error, never a pass: "no 429 seen" means nothing if nothing was seen.
+fetch() {
+  local out
+  out="$(request "$1" "$2")" || true
+  STATUS="${out%% *}"
+  CTYPE="${out#* }"
+  if [[ -z "$STATUS" || "$STATUS" == "000" ]]; then
+    echo "error: could not reach $BASE — nothing was verified." >&2
+    exit 2
+  fi
+}
+
 failed=0
 
 # ── 1. Legitimate worst case ───────────────────────────────────────────────
@@ -71,13 +84,13 @@ failed=0
 echo "1/3  legitimate envelope: 15 distinct links over 60s, then 5 rapid refreshes"
 caught=0
 for i in $(seq 1 15); do
-  read -r status _ < <(request "$(random_token)" /dev/null)
+  fetch "$(random_token)" /dev/null; status="$STATUS"
   [[ "$status" == "429" ]] && caught=$((caught + 1))
   sleep 4
 done
 bride="$(random_token)"
 for i in $(seq 1 5); do
-  read -r status _ < <(request "$bride" /dev/null)
+  fetch "$bride" /dev/null; status="$STATUS"
   [[ "$status" == "429" ]] && caught=$((caught + 1))
 done
 if [[ "$caught" -eq 0 ]]; then
@@ -93,7 +106,7 @@ sleep 65
 echo "2/3  burst: up to $((LIMIT + SLACK)) rapid requests, expecting 429"
 first_429=0
 for i in $(seq 1 $((LIMIT + SLACK))); do
-  read -r status _ < <(request "$(random_token)" /dev/null)
+  fetch "$(random_token)" /dev/null; status="$STATUS"
   if [[ "$status" == "429" ]]; then
     first_429="$i"
     break
@@ -110,8 +123,8 @@ fi
 echo "3/3  while limited: compare responses for different tokens"
 tok_a="$(random_token)"
 tok_b="$(random_token)"
-read -r s_a ct_a < <(request "$tok_a" "$WORK/a")
-read -r s_b ct_b < <(request "$tok_b" "$WORK/b")
+fetch "$tok_a" "$WORK/a"; s_a="$STATUS"; ct_a="$CTYPE"
+fetch "$tok_b" "$WORK/b"; s_b="$STATUS"; ct_b="$CTYPE"
 # The limited page is the host's, not ours. It must not echo the token back.
 if grep -qF -e "$tok_a" "$WORK/a" || grep -qF -e "$tok_b" "$WORK/b"; then
   echo "     FAIL: the limited response echoes the token from the path." >&2
@@ -122,7 +135,7 @@ statuses=("$s_a" "$s_b")
 types=("$ct_a" "$ct_b")
 bodies=("$WORK/a" "$WORK/b")
 if [[ -n "${PORTAL_PROBE_VALID_TOKEN:-}" ]]; then
-  read -r s_v ct_v < <(request "$PORTAL_PROBE_VALID_TOKEN" "$WORK/v")
+  fetch "$PORTAL_PROBE_VALID_TOKEN" "$WORK/v"; s_v="$STATUS"; ct_v="$CTYPE"
   summary="$summary, valid (staging): $s_v"
   statuses+=("$s_v"); types+=("$ct_v"); bodies+=("$WORK/v")
 else
