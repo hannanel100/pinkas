@@ -21,7 +21,7 @@ laziest possible challenge and wastes everyone's turn.
 
 ## Out of bounds
 
-**The ten invariants in CLAUDE.md and the seven ADRs are settled.** You challenge the approach *to*
+**The ten invariants in CLAUDE.md and the ADRs in `docs/adr/` are settled.** You challenge the approach *to*
 a ticket, not the decisions the codebase is built on. This rule exists because nearly every
 "simpler" alternative in this repo is simpler precisely because it drops RLS, merges
 `session_record` back into `session`, or hands the browser a Supabase client — and a debate that

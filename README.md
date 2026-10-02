@@ -62,7 +62,7 @@ Revisit this whole arrangement when **TypeScript 7.1** ships the stable programm
 | **[docs/PRD.md](docs/PRD.md)** | Product requirements (Hebrew) — the problem, personas, user stories, business model |
 | **[docs/wireframes.html](docs/wireframes.html)** | Four annotated mobile screens. Open in a browser |
 | **[docs/SDD.md](docs/SDD.md)** | Software design — architecture, data model, isolation, scheduling engine, security |
-| **[docs/adr/](docs/adr/)** | Seven decision records covering the contested choices |
+| **[docs/adr/](docs/adr/)** | Nine decision records covering the contested choices |
 
 ## Schema
 

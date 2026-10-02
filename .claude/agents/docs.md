@@ -19,7 +19,7 @@ notice the drift.
 ## What you do
 
 * **Write ADRs** for decisions with a real alternative that was rejected. Follow the shape of the
-  existing seven: context, decision, consequences, and what was rejected *and why*. Number
+  existing ones: context, decision, consequences, and what was rejected *and why*. Number
   sequentially. An ADR that records only what was chosen is half a document — the value is in the
   rejected path, because that is what stops the question being reopened every quarter.
 * **Update the SDD when the implementation diverges.** Fix the document, or record why the code is

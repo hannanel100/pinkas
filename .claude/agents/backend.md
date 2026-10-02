@@ -54,7 +54,7 @@ modules, and instructor modules cannot import `portal.ts`. When you touch it:
   only thing standing between a portal visitor and the whole table.
 * Read `portal_session_view` only. Never join to `session_record`, never widen the view.
 * Check `portal_expires_at` and a null `portal_token_hash` (revoked) before returning anything.
-* Rate-limit per IP and per token prefix. Set `noindex, nofollow` and `Referrer-Policy: no-referrer`.
+* Rate-limit per IP and per prefix of the token's **hash**, never of the token (SDD §6.2). Set `noindex, nofollow` and `Referrer-Policy: no-referrer`.
 
 ## Other things that are yours
 
@@ -65,7 +65,9 @@ modules, and instructor modules cannot import `portal.ts`. When you touch it:
   never inline the algorithm or reimplement a risk tier in SQL-adjacent TypeScript. Recomputation
   returns a proposal and never silently writes.
 * **Today (§18.1):** `getTodayScreen` is **one aggregated query** returning risk, sessions and
-  payment totals together. Three round trips misses the 2s budget.
+  payment totals together. Three round trips misses the 2s budget. Risk arrives as the view's
+  aggregate and `today.ts` calls `assessRisk()` for the verdict, with `today` injected (§8.1,
+  ADR-0008) — never select `risk_level` from the view for the screen.
 * **Phone numbers** normalise to E.164 on write. **Money** is `numeric(10,2)` with an explicit
   currency — never a float.
 * **`message_log.status` is `composed`, never `sent`.** A `wa.me` link cannot confirm delivery.
