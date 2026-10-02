@@ -1,6 +1,12 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // Mirrors tsconfig's `@/*` path, so tests import the way the app does.
+  resolve: {
+    alias: { "@": fileURLToPath(new URL(".", import.meta.url)) },
+  },
   test: {
     // The domain engines are pure (SDD §17.2) — no DOM, no environment setup,
     // no clock: `today` is injected, so the fixture tables are deterministic.

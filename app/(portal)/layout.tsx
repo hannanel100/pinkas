@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 
 import { fontVariables } from "@/app/fonts";
 import "@/app/globals.css";
+import { t } from "@/lib/i18n";
 
 /**
  * Root layout for Path 2 — the bride portal. A different product entirely
@@ -22,7 +23,7 @@ import "@/app/globals.css";
 export const metadata: Metadata = {
   // SDD §6.3 — neutral title, no identifying words in meta or Open Graph. The
   // bride may be reading this with other people around.
-  title: "פנקס",
+  title: t.app.name,
   robots: {
     index: false,
     follow: false,

@@ -609,6 +609,8 @@ Three families, with a rule the wireframe follows without stating:
 
 Every numeric or temporal value in all four plates is mono; no prose ever is. This is what makes "18 יום" and "₪2,400" read as data at a glance. Encoded as a `<Metric>` primitive rather than left to per-component discipline.
 
+Precisely: every *standalone* quantity is mono — the countdown, the time, the sum, the fraction, the section count. A number *inside a sentence* is prose, and the wireframe sets it so: "4 מפגשים נותרו · לא ייגמר בזמן" is Assistant throughout. And only the quantity is mono — in "18 יום" the `18` is a Metric and `יום` stays in Assistant. The string layer returns such copy as a `Phrase` (prose and metric segments), and `<Phrase>` in `components/ui/` renders the metric half through `<Metric>`.
+
 ### 10.4 Fonts
 
 Suez One, Assistant and IBM Plex Mono, **self-hosted via `next/font`**, subset to Hebrew + Latin. No runtime request to Google Fonts: it is a render-blocking third-party round trip against the 2-second budget (§18), and on portal routes it would place the page load in a third-party log (§6.3).
@@ -623,7 +625,7 @@ Suez One, Assistant and IBM Plex Mono, **self-hosted via `next/font`**, subset t
 * This enforces existing practice rather than introducing policy — `wireframes.html` already uses logical properties throughout (`border-inline-start` on risk cards, `inset-inline-start` on callouts).
 * Numerals, times and currency stay LTR inside RTL text; the `<Metric>` primitive (§10.3) sets `dir="ltr"` on its own content so `17:00` and `₪2,400` never reorder.
 * Icons implying direction (the back arrow, `→` in the wireframe's `.backbar`) mirror with direction.
-* All strings live in a translation layer from day one. Not for translation — for keeping copy out of components, so the risk sentences in §8.3 can be composed from reason codes.
+* All strings live in a translation layer from day one. Not for translation — for keeping copy out of components, so the risk sentences in §8.3 can be composed from reason codes. The layer is `lib/i18n/` (catalog in `he.ts`), and a lint rule makes a Hebrew literal anywhere under `app/` or `components/` an error. It owns Hebrew counting too, which concatenation gets wrong: "יום אחד", "יומיים", "9 ימים", "18 יום".
 
 ---
 
