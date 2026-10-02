@@ -20,7 +20,7 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [`docs/schema.sql`](docs/schema.sql) | Authoritative schema. Becomes `supabase/migrations/0001_init.sql` unchanged. |
 | [`docs/schema.test.sql`](docs/schema.test.sql) | Isolation + risk-tier verification suite. Belongs in CI from the first commit. |
 | [`docs/schema.bootstrap.sql`](docs/schema.bootstrap.sql) | Emulates Supabase's `auth.uid()` and roles so the suite runs on plain Postgres. |
-| [`docs/adr/`](docs/adr/) | Seven decision records covering the contested choices. |
+| [`docs/adr/`](docs/adr/) | Nine decision records covering the contested choices. |
 
 ### The ADRs
 
@@ -33,6 +33,8 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [0005](docs/adr/0005-hashed-portal-tokens.md) | Hashed opaque portal tokens, not JWT magic links |
 | [0006](docs/adr/0006-server-only-data-access.md) | All bride-data access goes through the server |
 | [0007](docs/adr/0007-wa-me-deep-links.md) | `wa.me` deep links, not the WhatsApp Business API (Phase 1) |
+| [0008](docs/adr/0008-today-risk-from-the-aggregate.md) | Today ranks risk in `risk.ts` from `v_course_risk`'s aggregate, not its verdict |
+| [0009](docs/adr/0009-session-record-column-revoke.md) | `session_record`'s private columns are readable only through an audited reader |
 
 ## Invariants
 

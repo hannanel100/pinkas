@@ -27,7 +27,7 @@ most code. If two agents own equal weight, split the ticket.
 | B2, B4, C5 scheduling and feasibility | `domain` | The engine. The screen that renders it is a separate `frontend` ticket |
 | C1 Today screen | `frontend` | The aggregated query behind it is a `backend` ticket |
 | C2, C3, C4 session records, private notes, carry-forward | `backend` | Private data — always name invariant 2 in "Invariants in play" |
-| C6 who is at risk | `database` | `v_course_risk` is the source of truth; `domain/risk.ts` mirrors it |
+| C6 who is at risk | `domain` for the tiers, `database` for the view | `domain/risk.ts` ranks Today; `v_course_risk` is the nightly job's source of truth (ADR-0008). A tier change touches both |
 | D1 reminders, D2 templates | `domain` for rendering, `frontend` for the one-tap deep link | |
 | D3 portal link, E1–E4 portal | `backend` | Token issuance and Path 2. Route a `security` review alongside |
 | F1, F2, F3 payments | `backend` | |
