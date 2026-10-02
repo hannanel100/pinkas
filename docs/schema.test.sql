@@ -91,8 +91,14 @@ begin
   select count(*) into n from session_record;
   if n <> 1 then raise exception 'FAIL: tenant A sees % session_records, expected 1', n; end if;
 
-  select count(*) into n from session_record where private_note like 'B %';
-  if n <> 0 then raise exception 'FAIL: tenant A read tenant B private_note'; end if;
+  -- #34: the private columns are no longer directly readable at all; that
+  -- private_note never crosses tenants is asserted through the audited
+  -- reader in the "#31 / #34" section below.
+  begin
+    select count(*) into n from session_record where private_note like 'B %';
+    raise exception 'FAIL: authenticated can read session_record.private_note directly';
+  exception when insufficient_privilege then null;
+  end;
 
   -- 4. views respect the caller's RLS (this is what security_invoker buys)
   select count(*) into n from v_course_risk;
@@ -1147,7 +1153,8 @@ reset timezone;
 
 -- =============================================================
 -- BEGIN #31 / #34 — platform default grants; session_record's private columns
--- Requires migration 0005_revoke_platform_default_grants.sql and the default-privilege
+-- Requires migrations 0005_revoke_platform_default_grants.sql and
+-- 0006_session_record_audited_reader.sql, and the default-privilege
 -- emulation at the end of schema.bootstrap.sql (without it the #31
 -- assertions would pass vacuously).
 -- =============================================================
@@ -1280,6 +1287,447 @@ begin
   raise notice 'PASS: service_role keeps SELECT on every public relation except session_record';
 end $$;
 
+-- ---------- #34: the shape that makes the reader safe ----------
+do $$
+declare f pg_proc%rowtype; owner pg_roles%rowtype; col text; n int;
+begin
+  -- the owner role
+  select * into owner from pg_roles where rolname = 'session_record_reader';
+  if not found then raise exception 'FAIL: role session_record_reader is missing'; end if;
+  if owner.rolbypassrls then raise exception 'FAIL: session_record_reader has BYPASSRLS'; end if;
+  if owner.rolsuper     then raise exception 'FAIL: session_record_reader is a superuser'; end if;
+  if owner.rolcanlogin  then raise exception 'FAIL: session_record_reader can log in'; end if;
+  if not pg_has_role('session_record_reader', 'authenticated', 'USAGE') then
+    raise exception 'FAIL: session_record_reader does not inherit authenticated - the tenant policies would not apply to it';
+  end if;
+  if pg_has_role('authenticated', 'session_record_reader', 'MEMBER')
+     or pg_has_role('anon', 'session_record_reader', 'MEMBER')
+     or pg_has_role('service_role', 'session_record_reader', 'MEMBER') then
+    raise exception 'FAIL: an API role can SET ROLE to session_record_reader';
+  end if;
+  -- RLS does not apply to a table's owner: owning any table would let the
+  -- reader see every tenant's rows of it.
+  select count(*) into n from pg_class where relowner = owner.oid;
+  if n <> 0 then raise exception 'FAIL: session_record_reader owns % relation(s)', n; end if;
+
+  -- the reader
+  select * into f from pg_proc
+  where oid = to_regprocedure('public.read_session_records(uuid[],uuid)');
+  if f.oid is null then raise exception 'FAIL: read_session_records(uuid[],uuid) is missing'; end if;
+  if not f.prosecdef then raise exception 'FAIL: read_session_records is not SECURITY DEFINER'; end if;
+  if f.proowner <> owner.oid then
+    raise exception 'FAIL: read_session_records is owned by %, not session_record_reader',
+      f.proowner::regrole;
+  end if;
+  if (select rolbypassrls or rolsuper from pg_roles where oid = f.proowner) then
+    raise exception 'FAIL: read_session_records owner bypasses RLS';
+  end if;
+  if f.proconfig is null or not ('search_path=""' = any (f.proconfig)) then
+    raise exception 'FAIL: read_session_records does not set search_path = '''' (got %)', f.proconfig;
+  end if;
+  if f.provolatile <> 'v' then raise exception 'FAIL: read_session_records is not VOLATILE - it writes'; end if;
+  if not has_function_privilege('authenticated', f.oid, 'EXECUTE') then
+    raise exception 'FAIL: authenticated cannot execute read_session_records';
+  end if;
+  if has_function_privilege('anon', f.oid, 'EXECUTE')
+     or has_function_privilege('service_role', f.oid, 'EXECUTE') then
+    raise exception 'FAIL: anon or service_role can execute read_session_records';
+  end if;
+
+  -- the writer: invoker rights, pinned path, same callers
+  select * into f from pg_proc
+  where oid = to_regprocedure('public.upsert_session_record(uuid,uuid[],text,text)');
+  if f.oid is null then raise exception 'FAIL: upsert_session_record is missing'; end if;
+  if f.prosecdef then raise exception 'FAIL: upsert_session_record is SECURITY DEFINER'; end if;
+  if f.proconfig is null or not ('search_path=""' = any (f.proconfig)) then
+    raise exception 'FAIL: upsert_session_record does not set search_path = ''''';
+  end if;
+  if not has_function_privilege('authenticated', f.oid, 'EXECUTE')
+     or has_function_privilege('anon', f.oid, 'EXECUTE')
+     or has_function_privilege('service_role', f.oid, 'EXECUTE') then
+    raise exception 'FAIL: upsert_session_record is executable by the wrong roles';
+  end if;
+
+  -- column privileges: the three private names are readable by the reader
+  -- role and by nobody else; the five the write path needs stay readable.
+  if has_table_privilege('authenticated', 'public.session_record', 'SELECT')
+     or has_table_privilege('service_role', 'public.session_record', 'SELECT') then
+    raise exception 'FAIL: a table-level SELECT on session_record survives';
+  end if;
+  foreach col in array array['private_note','needs_review_note','covered_topic_ids'] loop
+    if has_column_privilege('authenticated', 'public.session_record', col, 'SELECT') then
+      raise exception 'FAIL: authenticated can SELECT session_record.%', col;
+    end if;
+    if has_column_privilege('service_role', 'public.session_record', col, 'SELECT') then
+      raise exception 'FAIL: service_role can SELECT session_record.%', col;
+    end if;
+    if has_column_privilege('anon', 'public.session_record', col, 'SELECT') then
+      raise exception 'FAIL: anon can SELECT session_record.%', col;
+    end if;
+    if not has_column_privilege('session_record_reader', 'public.session_record', col, 'SELECT') then
+      raise exception 'FAIL: session_record_reader cannot SELECT session_record.%', col;
+    end if;
+  end loop;
+  foreach col in array array['session_id','tenant_id','created_at','updated_at','deleted_at'] loop
+    if not has_column_privilege('authenticated', 'public.session_record', col, 'SELECT') then
+      raise exception 'FAIL: authenticated lost SELECT on session_record.% (the write path needs it)', col;
+    end if;
+  end loop;
+  if not has_table_privilege('authenticated', 'public.session_record', 'INSERT')
+     or not has_table_privilege('authenticated', 'public.session_record', 'UPDATE') then
+    raise exception 'FAIL: authenticated lost INSERT/UPDATE on session_record';
+  end if;
+
+  -- §5.2 extended to routines: the three names may leave the database as
+  -- output columns of exactly one function, and only the reader and the
+  -- writer may mention them at all. A view or function that surfaces a note
+  -- any other way fails here, wherever it is introduced.
+  select count(*) into n
+  from pg_proc p
+  cross join lateral unnest(p.proargnames, p.proargmodes) as a(name, mode)
+  where p.pronamespace = 'public'::regnamespace
+    and a.mode in ('o','t','b')
+    and a.name in ('private_note','needs_review_note','covered_topic_ids')
+    and p.oid <> to_regprocedure('public.read_session_records(uuid[],uuid)');
+  if n <> 0 then
+    raise exception 'FAIL: % private output column(s) on a function other than read_session_records', n;
+  end if;
+
+  select count(*) into n
+  from pg_proc p
+  where p.pronamespace = 'public'::regnamespace
+    and p.prosrc ~ '(private_note|needs_review_note|covered_topic_ids)'
+    and p.oid not in (to_regprocedure('public.read_session_records(uuid[],uuid)'),
+                      to_regprocedure('public.upsert_session_record(uuid,uuid[],text,text)'));
+  if n <> 0 then
+    raise exception 'FAIL: % function(s) besides the reader/writer reference session_record''s private columns', n;
+  end if;
+
+  select count(*) into n
+  from pg_views
+  where schemaname = 'public'
+    and definition ~ '(private_note|needs_review_note|covered_topic_ids)';
+  if n <> 0 then
+    raise exception 'FAIL: % view(s) reference session_record''s private columns', n;
+  end if;
+
+  if not exists (select 1 from pg_constraint
+                 where conrelid = 'public.access_log'::regclass
+                   and conname = 'access_log_instructor_actor_ck' and contype = 'c') then
+    raise exception 'FAIL: access_log_instructor_actor_ck is missing';
+  end if;
+
+  raise notice 'PASS: reader is SECURITY DEFINER owned by a NOLOGIN NOBYPASSRLS role, search_path pinned; private columns readable only through it';
+end $$;
+
+-- ---------- #34: RLS applies to the reader's role itself ----------
+-- Independent of the function: if the role ever stopped matching the tenant
+-- policies (membership dropped, BYPASSRLS granted) this shows it directly.
+set role session_record_reader;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int;
+begin
+  select count(*) into n from session_record where private_note like 'B %';
+  if n <> 0 then raise exception 'FAIL: session_record_reader sees tenant B notes'; end if;
+  select count(*) into n from session_record where private_note = 'A private note';
+  if n <> 1 then raise exception 'FAIL: session_record_reader does not see tenant A''s own note'; end if;
+  raise notice 'PASS: tenant RLS applies to session_record_reader itself';
+end $$;
+reset role;
+
+-- ---------- #34: reads through the reader, as tenant A ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int; note text;
+begin
+  -- the direct door is shut...
+  begin
+    perform private_note from session_record;
+    raise exception 'FAIL: authenticated read session_record.private_note directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform needs_review_note from session_record;
+    raise exception 'FAIL: authenticated read session_record.needs_review_note directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform covered_topic_ids from session_record;
+    raise exception 'FAIL: authenticated read session_record.covered_topic_ids directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform * from session_record;
+    raise exception 'FAIL: select * on session_record succeeded';
+  exception when insufficient_privilege then null;
+  end;
+  -- ...but the non-private columns still are
+  select count(*) into n from session_record where session_id = 'a3000000-0000-4000-8000-000000000001';
+  if n <> 1 then raise exception 'FAIL: session_id is no longer readable by its tenant'; end if;
+
+  -- tenant A asking for A's and B's session gets A's only
+  select count(*), max(x.private_note) into n, note
+  from public.read_session_records(
+    array['a3000000-0000-4000-8000-000000000001',
+          'b3000000-0000-4000-8000-000000000001']::uuid[],
+    '11111111-0000-4000-8000-000000000001') x;
+  if n <> 1 or note is distinct from 'A private note' then
+    raise exception 'FAIL: reader returned % row(s) / note %, expected tenant A''s one', n, note;
+  end if;
+
+  -- THE assertion: tenant B's record, asked for by primary key, is zero rows.
+  -- Without it this change would be a hole with a log.
+  select count(*) into n
+  from public.read_session_records(
+    array['b3000000-0000-4000-8000-000000000001']::uuid[],
+    '11111111-0000-4000-8000-000000000002');
+  if n <> 0 then
+    raise exception 'FAIL: the reader returned % tenant B row(s) to tenant A', n;
+  end if;
+
+  select count(*) into n from public.read_session_records('{}'::uuid[], null);
+  if n <> 0 then raise exception 'FAIL: reader returned rows for an empty id list'; end if;
+  select count(*) into n from public.read_session_records(null, null);
+  if n <> 0 then raise exception 'FAIL: reader returned rows for a null id list'; end if;
+
+  raise notice 'PASS: private columns not directly readable; the reader returns tenant A''s record and zero rows for tenant B';
+end $$;
+
+-- support, impersonating tenant A (SDD §16.2): logged as support, by the engineer
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001","impersonated_by":"e0000000-0000-4000-8000-0000000000e1"}';
+do $$
+declare n int;
+begin
+  select count(*) into n from public.read_session_records(
+    array['a3000000-0000-4000-8000-000000000001']::uuid[],
+    '11111111-0000-4000-8000-000000000003');
+  if n <> 1 then raise exception 'FAIL: impersonated read returned % rows, expected 1', n; end if;
+end $$;
+
+-- an impersonation claim that is not a uuid is refused, not misattributed
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001","impersonated_by":"somebody"}';
+do $$
+begin
+  perform * from public.read_session_records(
+    array['a3000000-0000-4000-8000-000000000001']::uuid[],
+    '11111111-0000-4000-8000-000000000004');
+  raise exception 'FAIL: reader accepted a non-uuid impersonated_by claim';
+exception when sqlstate '28000' then null;
+end $$;
+
+-- no JWT subject: refused
+set request.jwt.claims = '{}';
+do $$
+begin
+  perform * from public.read_session_records(
+    array['a3000000-0000-4000-8000-000000000001']::uuid[], null);
+  raise exception 'FAIL: reader ran without an authenticated caller';
+exception when sqlstate '28000' then null;
+end $$;
+reset role;
+
+-- anon and service_role cannot call the reader or read the columns at all
+set role anon;
+do $$
+begin
+  perform * from public.read_session_records(array[]::uuid[], null);
+  raise exception 'FAIL: anon executed read_session_records';
+exception when insufficient_privilege then null;
+end $$;
+reset role;
+set role service_role;
+do $$
+begin
+  begin
+    perform * from public.read_session_records(array[]::uuid[], null);
+    raise exception 'FAIL: service_role executed read_session_records';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform private_note from session_record;
+    raise exception 'FAIL: service_role read session_record.private_note directly (an unlogged support read)';
+  exception when insufficient_privilege then null;
+  end;
+  raise notice 'PASS: anon and service_role can neither call the reader nor read the private columns';
+end $$;
+reset role;
+
+-- ---------- #34: every disclosure is logged; nothing else is ----------
+do $$
+declare r record; n int;
+begin
+  select count(*) into n from access_log where request_id = '11111111-0000-4000-8000-000000000001';
+  if n <> 1 then raise exception 'FAIL: reader wrote % log rows for one disclosed bride, expected 1', n; end if;
+  select * into r from access_log where request_id = '11111111-0000-4000-8000-000000000001';
+  if r.tenant_id <> 'a0000000-0000-4000-8000-000000000001'
+     or r.actor_kind <> 'instructor'
+     or r.actor_id is distinct from 'a0000000-0000-4000-8000-000000000001'
+     or r.bride_id is distinct from 'a1000000-0000-4000-8000-000000000001'
+     or r.action <> 'read' or r.resource <> 'session_record' then
+    raise exception 'FAIL: reader log row is wrong: %', row_to_json(r);
+  end if;
+
+  -- nothing disclosed, nothing logged - and never a row naming tenant B
+  select count(*) into n from access_log
+   where request_id in ('11111111-0000-4000-8000-000000000002',
+                        '11111111-0000-4000-8000-000000000004');
+  if n <> 0 then raise exception 'FAIL: % log rows for reads that disclosed nothing', n; end if;
+  select count(*) into n from access_log where tenant_id = 'b0000000-0000-4000-8000-000000000002';
+  if n <> 0 then raise exception 'FAIL: tenant A''s reads wrote % log rows under tenant B', n; end if;
+
+  select * into r from access_log where request_id = '11111111-0000-4000-8000-000000000003';
+  if r.actor_kind is distinct from 'support'
+     or r.actor_id is distinct from 'e0000000-0000-4000-8000-0000000000e1'
+     or r.tenant_id <> 'a0000000-0000-4000-8000-000000000001' then
+    raise exception 'FAIL: impersonated read not logged as support by the engineer: %', row_to_json(r);
+  end if;
+
+  raise notice 'PASS: one access_log row per disclosed bride, attributed from the JWT; none for empty or refused reads';
+end $$;
+
+-- The read and its log row cannot come apart: if the log insert fails, the
+-- caller receives nothing. Forced with a trigger that rejects the insert.
+create function pg_temp.reject_log34() returns trigger language plpgsql as
+  $$ begin raise exception 'log rejected' using errcode = 'P0001'; end $$;
+create trigger reject_log34 before insert on access_log
+  for each row execute function pg_temp.reject_log34();
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int := -1;
+begin
+  begin
+    select count(*) into n from public.read_session_records(
+      array['a3000000-0000-4000-8000-000000000001']::uuid[],
+      '11111111-0000-4000-8000-000000000005');
+    raise exception 'FAIL: reader returned % row(s) although its log insert failed', n;
+  exception when sqlstate 'P0001' then
+    if sqlerrm <> 'log rejected' then raise; end if;
+  end;
+  raise notice 'PASS: a failed log insert fails the read with it';
+end $$;
+reset role;
+drop trigger reject_log34 on access_log;
+
+-- ---------- #34: the write path works under the column revoke ----------
+-- Two fresh tenant-A sessions without records, seeded as superuser.
+insert into session (id, tenant_id, course_id, order_index, scheduled_at, status) values
+  ('a3000000-0000-4000-8000-0000000000aa', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000001', 2, now() - interval '1 day', 'done'),
+  ('a3000000-0000-4000-8000-0000000000ab', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000001', 3, now() - interval '1 day', 'done');
+
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare r record; n int;
+begin
+  -- insert branch
+  select * into r from public.upsert_session_record(
+    'a3000000-0000-4000-8000-0000000000aa', array['a2000000-0000-4000-8000-0000000000ff']::uuid[],
+    'first note', null);
+  if r.session_id is distinct from 'a3000000-0000-4000-8000-0000000000aa' then
+    raise exception 'FAIL: upsert (insert branch) returned %', row_to_json(r);
+  end if;
+  -- update branch, same key
+  select * into r from public.upsert_session_record(
+    'a3000000-0000-4000-8000-0000000000aa', null, 'second note', 'review this');
+  select count(*) into n from session_record
+   where session_id = 'a3000000-0000-4000-8000-0000000000aa'
+     and tenant_id = 'a0000000-0000-4000-8000-000000000001';
+  if n <> 1 then raise exception 'FAIL: upsert did not converge on one row (got %)', n; end if;
+
+  -- plain UPDATE ... WHERE session_id (a PostgREST PATCH) still works
+  update session_record set needs_review_note = 'review that'
+   where session_id = 'a3000000-0000-4000-8000-0000000000aa';
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL: plain update of an own record touched % rows', n; end if;
+
+  -- plain INSERT (a PostgREST POST, no upsert) still works
+  insert into session_record (session_id, tenant_id, private_note)
+  values ('a3000000-0000-4000-8000-0000000000ab', 'a0000000-0000-4000-8000-000000000001', 'posted');
+
+  -- the shape PostgREST's .upsert() generates fails, by design: reading
+  -- EXCLUDED.private_note needs the column SELECT that was revoked.
+  begin
+    insert into session_record (session_id, tenant_id, private_note)
+    values ('a3000000-0000-4000-8000-0000000000ab', 'a0000000-0000-4000-8000-000000000001', 'merged')
+    on conflict (session_id) do update set private_note = excluded.private_note;
+    raise exception 'FAIL: ON CONFLICT ... EXCLUDED.private_note succeeded - the column revoke has regressed';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- another tenant's session cannot take a record
+  begin
+    perform * from public.upsert_session_record(
+      'b3000000-0000-4000-8000-000000000001', null, 'injected', null);
+    raise exception 'FAIL: upsert_session_record wrote against tenant B''s session';
+  exception when sqlstate 'P0002' then null;
+  end;
+
+  -- read back through the reader: the writes landed as written
+  select count(*) into n from public.read_session_records(
+    array['a3000000-0000-4000-8000-0000000000aa','a3000000-0000-4000-8000-0000000000ab']::uuid[],
+    '11111111-0000-4000-8000-000000000006') x
+  where (x.session_id = 'a3000000-0000-4000-8000-0000000000aa'
+         and x.private_note = 'second note' and x.needs_review_note = 'review that'
+         and x.covered_topic_ids = '{}'::uuid[])
+     or (x.session_id = 'a3000000-0000-4000-8000-0000000000ab' and x.private_note = 'posted');
+  if n <> 2 then raise exception 'FAIL: written records did not read back as written (% of 2)', n; end if;
+
+  raise notice 'PASS: writes work under the column revoke - upsert function (both branches), PATCH, POST; merge-duplicates upsert refused';
+end $$;
+
+set request.jwt.claims = '{}';
+do $$
+begin
+  perform * from public.upsert_session_record(
+    'a3000000-0000-4000-8000-0000000000aa', null, 'nobody', null);
+  raise exception 'FAIL: upsert ran without an authenticated caller';
+exception when sqlstate '28000' then null;
+end $$;
+reset role;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from session_record
+   where session_id = 'b3000000-0000-4000-8000-000000000001'
+     and (private_note <> 'B private note' or tenant_id <> 'b0000000-0000-4000-8000-000000000002');
+  if n <> 0 then raise exception 'FAIL: tenant B''s record was altered by tenant A'; end if;
+  select count(*) into n from access_log where request_id = '11111111-0000-4000-8000-000000000006';
+  if n <> 1 then raise exception 'FAIL: the read-back of two records for one bride logged % rows, expected 1', n; end if;
+end $$;
+
+-- ---------- #34: access_log CHECK, both branches ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+begin
+  -- instructor branch: the actor must be the tenant
+  insert into access_log (tenant_id, actor_kind, actor_id, action, resource)
+  values (auth.uid(), 'instructor', auth.uid(), 'read', 'bride');
+  begin
+    insert into access_log (tenant_id, actor_kind, actor_id, action, resource)
+    values (auth.uid(), 'instructor', 'e0000000-0000-4000-8000-0000000000e1', 'read', 'bride');
+    raise exception 'FAIL: an instructor row attributed to someone other than the tenant was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into access_log (tenant_id, actor_kind, actor_id, action, resource)
+    values (auth.uid(), 'instructor', null, 'read', 'bride');
+    raise exception 'FAIL: an instructor row attributed to nobody was accepted';
+  exception when check_violation then null;
+  end;
+  -- non-instructor branch: the actor differs from the tenant, by design
+  insert into access_log (tenant_id, actor_kind, actor_id, action, resource)
+  values (auth.uid(), 'support', 'e0000000-0000-4000-8000-0000000000e1', 'read', 'session_record');
+
+  raise notice 'PASS: access_log CHECK - instructor rows must name the tenant; support rows may name the engineer';
+end $$;
+reset role;
 -- =============================================================
 -- END #31 / #34
 -- =============================================================

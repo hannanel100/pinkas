@@ -226,9 +226,28 @@ async function fullSuite() {
       check(!error && data?.length === 0, "tenant B bride invisible even addressed by primary key");
     }
     {
-      const { data, error } = await a.from("session_record").select("session_id, private_note");
-      const leaked = (data ?? []).some((r) => (r.private_note ?? "").startsWith("B "));
-      check(!error && data?.length === 1 && !leaked, "session_record isolated: one row, no tenant B note", error?.message ?? `got ${data?.length}`);
+      // #34: the private columns are not readable through PostgREST at all;
+      // the only read path is the audited reader, which must still be
+      // tenant-scoped (a reader that leaked would be a hole with a log).
+      const direct = await a.from("session_record").select("session_id, private_note");
+      check(
+        !!direct.error && direct.error.code === "42501",
+        "session_record.private_note is not directly readable (column revoked)",
+        direct.error ? `${direct.error.code} ${direct.error.message}` : `read ${direct.data?.length} row(s)`,
+      );
+      const rec = await a.from("session_record").select("session_id");
+      check(!rec.error && rec.data?.length === 1, "session_record non-private columns: tenant A sees exactly one row", rec.error?.message ?? `got ${rec.data?.length}`);
+      const both = await a.rpc("read_session_records", {
+        p_session_ids: [ids.sessionA, ids.sessionB],
+        p_request_id: randomUUID(),
+      });
+      const leaked = (both.data ?? []).some((r) => (r.private_note ?? "").startsWith("B "));
+      check(!both.error && both.data?.length === 1 && !leaked, "audited reader: tenant A gets its own note, no tenant B note", both.error?.message ?? `got ${both.data?.length}`);
+      const onlyB = await a.rpc("read_session_records", {
+        p_session_ids: [ids.sessionB],
+        p_request_id: randomUUID(),
+      });
+      check(!onlyB.error && onlyB.data?.length === 0, "audited reader: tenant B's record by primary key is zero rows", onlyB.error?.message ?? `got ${onlyB.data?.length}`);
     }
     {
       const { data, error } = await a.from("v_course_risk").select("course_id");
