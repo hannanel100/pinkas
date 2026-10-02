@@ -7,7 +7,7 @@
  * is right in the middle and wrong at the edge is the failure mode that matters
  * on the Today screen.
  *
- * `v_course_risk` in `schema.sql` remains the source of truth. The fixtures
+ * `v_course_risk` (`supabase/migrations/`) remains the source of truth. The fixtures
  * mirror the view's own test data in `schema.test.sql` where they overlap.
  */
 
@@ -98,13 +98,27 @@ const rows: readonly Row[] = [
     reasonCode: "wedding_approaching",
   },
   {
-    // The view disagrees here and ranks this `critical`; #42 settles which
-    // reading is right. Asserted so the divergence is visible in the suite
-    // rather than discovered from a screen.
-    name: "not critical — no target end date (diverges from v_course_risk, #42)",
+    // No deadline, no `critical`: there is nothing to fail to meet. The view
+    // agrees — schema.test.sql asserts the same reading on the same shapes.
+    name: "not critical — no target end date, sessions remaining",
     input: course({ targetEndDate: null, sessionsRemaining: 20 }),
     level: "none",
     reasonCode: null,
+  },
+  {
+    // schema.test.sql's NoDeadline fixture: no deadline, no wedding, 3 left.
+    name: "not critical — no target end date and no wedding date",
+    input: course({ targetEndDate: null, weddingDate: null, sessionsRemaining: 3 }),
+    level: "none",
+    reasonCode: null,
+  },
+  {
+    // schema.test.sql's NoDeadlineWed fixture: no deadline, 2 left, wedding in
+    // 18 days — falls through `critical` to the next tier that applies.
+    name: "info, not critical — no target end date, wedding approaching",
+    input: course({ targetEndDate: null, weddingDate: day(18), sessionsRemaining: 2 }),
+    level: "info",
+    reasonCode: "wedding_approaching",
   },
 
   /* ── high: a cancellation older than 7 days, never rescheduled ──────────── */

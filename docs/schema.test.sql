@@ -434,3 +434,713 @@ drop table bootstrap36;
 -- =============================================================
 -- END #36
 -- =============================================================
+
+-- =============================================================
+-- BEGIN #38 + #42 — v_course_risk: the Asia/Jerusalem clock, and no tier
+-- without a deadline
+-- Requires migration 0003_risk_clock_and_null_deadline.sql.
+-- =============================================================
+-- Tenant E = 38000000-0000-4000-8000-0000000000e0. Its boundary fixtures use
+-- FIXED dates in 2030 and call course_risk(p_today) directly, so every
+-- boundary is pinned to a known civil date instead of depending on when the
+-- suite runs. The view itself is then checked to be course_risk(<Israeli today>).
+--
+-- The Israeli-midnight instants used below:
+--   2030-03-01 22:30Z = 2030-03-02 00:30 in Jerusalem (IST, UTC+2) — UTC date 03-01
+--   2030-07-01 21:30Z = 2030-07-02 00:30 in Jerusalem (IDT, UTC+3) — UTC date 07-01
+-- Every boundary fixture is chosen so that the UTC reading gives a DIFFERENT
+-- answer: reverting to `current_date` / `now()` arithmetic fails this block.
+
+reset role;
+set timezone = 'UTC';   -- what a Supabase session runs under
+
+insert into instructor (id, full_name, phone) values
+  ('38000000-0000-4000-8000-0000000000e0', 'Esther (tenant E, #38/#42)', '050-0000038');
+
+insert into bride (id, tenant_id, first_name, wedding_date, status) values
+  -- #42: no deadline, no wedding date
+  ('38100000-0000-4000-8000-000000000001', '38000000-0000-4000-8000-0000000000e0', 'NoDeadline',    null,                        'active'),
+  -- #42: no deadline, wedding close — must fall through to `info`, not `critical`
+  ('38100000-0000-4000-8000-000000000002', '38000000-0000-4000-8000-0000000000e0', 'NoDeadlineWed', date '2030-03-20',           'active'),
+  -- #38: critical boundary at Israeli midnight
+  ('38100000-0000-4000-8000-000000000003', '38000000-0000-4000-8000-0000000000e0', 'CritEdge',      date '2030-06-01',           'active'),
+  -- #38: stale-cancellation boundary
+  ('38100000-0000-4000-8000-000000000004', '38000000-0000-4000-8000-0000000000e0', 'StaleEdge',     date '2031-06-01',           'active'),
+  -- #38: no-recent-session boundary
+  ('38100000-0000-4000-8000-000000000005', '38000000-0000-4000-8000-0000000000e0', 'MedEdge',       date '2031-06-01',           'active'),
+  -- #38: the live view, relative to the real Israeli today
+  ('38100000-0000-4000-8000-000000000006', '38000000-0000-4000-8000-0000000000e0', 'LiveClock',     jerusalem_date(now()) + 200, 'active'),
+  -- soft-deleted bride with an active course: must not rank at all
+  ('38100000-0000-4000-8000-000000000007', '38000000-0000-4000-8000-0000000000e0', 'DeletedBride',  null,                        'active');
+update bride set deleted_at = now() where id = '38100000-0000-4000-8000-000000000007';
+
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, status) values
+  ('38200000-0000-4000-8000-000000000001', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000001', '{}', null,                       'active'),
+  ('38200000-0000-4000-8000-000000000002', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000002', '{}', null,                       'active'),
+  ('38200000-0000-4000-8000-000000000003', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000003', '{}', date '2030-03-15',         'active'),
+  ('38200000-0000-4000-8000-000000000004', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000004', '{}', date '2031-05-01',         'active'),
+  ('38200000-0000-4000-8000-000000000005', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000005', '{}', date '2031-05-01',         'active'),
+  ('38200000-0000-4000-8000-000000000006', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000006', '{}', jerusalem_date(now()) + 20, 'active'),
+  ('38200000-0000-4000-8000-000000000007', '38000000-0000-4000-8000-0000000000e0', '38100000-0000-4000-8000-000000000007', '{}', null,                       'active');
+
+insert into session (tenant_id, course_id, order_index, scheduled_at, status) values
+  -- no-deadline courses with sessions remaining: exactly what used to trip `critical`
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000001', 1, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000001', 2, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000001', 3, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000002', 1, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000002', 2, null, 'planned'),
+  -- CritEdge: 2 planned, deadline 2030-03-15.
+  --   Israeli today 03-02 -> 13 days -> 1 whole week  -> 2 > 1 -> critical
+  --   UTC today     03-01 -> 14 days -> 2 whole weeks -> 2 > 2 false -> none
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000003', 1, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000003', 2, null, 'planned'),
+  -- StaleEdge: cancelled at 2030-03-01 22:30Z = Israeli 03-02. Never rescheduled.
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000004', 1, timestamptz '2030-03-01 22:30:00+00', 'cancelled'),
+  -- MedEdge: last done at 2030-03-01 22:30Z = Israeli 03-02.
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000005', 1, timestamptz '2030-03-01 22:30:00+00', 'done'),
+  -- LiveClock: 1 planned, deadline 20 Israeli days out -> none
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000006', 1, null, 'planned'),
+  ('38000000-0000-4000-8000-0000000000e0', '38200000-0000-4000-8000-000000000007', 1, null, 'planned');
+
+-- ---------- the clock itself ----------
+do $$
+begin
+  if jerusalem_date('2030-03-01 22:30:00+00') <> date '2030-03-02' then
+    raise exception 'FAIL: jerusalem_date at Israeli midnight (IST) gave %, expected 2030-03-02',
+      jerusalem_date('2030-03-01 22:30:00+00');
+  end if;
+  if jerusalem_date('2030-07-01 21:30:00+00') <> date '2030-07-02' then
+    raise exception 'FAIL: jerusalem_date at Israeli midnight (IDT) gave %, expected 2030-07-02',
+      jerusalem_date('2030-07-01 21:30:00+00');
+  end if;
+  if jerusalem_date('2030-03-01 21:59:59+00') <> date '2030-03-01' then
+    raise exception 'FAIL: jerusalem_date one second before Israeli midnight crossed the day';
+  end if;
+  -- the session timezone must not leak into it
+  set local timezone = 'Pacific/Kiritimati';
+  if jerusalem_date('2030-03-01 22:30:00+00') <> date '2030-03-02' then
+    raise exception 'FAIL: jerusalem_date depends on the session timezone';
+  end if;
+  raise notice 'PASS: jerusalem_date resolves Israeli civil dates at both DST offsets, independent of the session timezone';
+end $$;
+
+-- ---------- structure: one clock, invoker-rights, narrowly granted ----------
+do $$
+declare def text; f record; v record;
+begin
+  -- the view must be course_risk(jerusalem_date(now())) and read no other clock
+  def := pg_get_viewdef('public.v_course_risk'::regclass, true);
+  if def ilike '%current_date%' or def not ilike '%jerusalem_date(now())%' then
+    raise exception 'FAIL: v_course_risk is not computed against jerusalem_date(now()): %', def;
+  end if;
+
+  select prosrc, prosecdef into f from pg_proc where oid = 'public.course_risk(date)'::regprocedure;
+  if f.prosrc ilike '%current_date%' or f.prosrc ilike '%now()%'
+     or f.prosrc ilike '%localtimestamp%' or f.prosrc ilike '%current_timestamp%' then
+    raise exception 'FAIL: course_risk reads an ambient clock; it must use p_today only';
+  end if;
+  if f.prosecdef then
+    raise exception 'FAIL: course_risk is SECURITY DEFINER - it would bypass RLS';
+  end if;
+
+  -- every view in public stays security_invoker (SDD §4.2)
+  for v in
+    select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'v'
+      and not coalesce(c.reloptions @> array['security_invoker=on'], false)
+      and not coalesce(c.reloptions @> array['security_invoker=true'], false)
+  loop
+    raise exception 'FAIL: view % is not security_invoker', v.relname;
+  end loop;
+
+  for f in
+    select p.oid, p.oid::regprocedure::text as sig from pg_proc p
+    where p.oid in ('public.course_risk(date)'::regprocedure,
+                    'public.jerusalem_date(timestamptz)'::regprocedure)
+  loop
+    if not has_function_privilege('authenticated', f.oid, 'execute') then
+      raise exception 'FAIL: authenticated cannot execute % (v_course_risk would break)', f.sig;
+    end if;
+    if has_function_privilege('anon', f.oid, 'execute') then
+      raise exception 'FAIL: anon can execute %', f.sig;
+    end if;
+    if has_function_privilege('service_role', f.oid, 'execute') then
+      raise exception 'FAIL: service_role can execute % (invariant 5)', f.sig;
+    end if;
+  end loop;
+
+  raise notice 'PASS: v_course_risk has one clock (jerusalem_date), course_risk is invoker-rights, all views security_invoker';
+end $$;
+
+-- ---------- tier boundaries, pinned to Israeli civil dates ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"38000000-0000-4000-8000-0000000000e0"}';
+
+do $$
+declare r record; got text; israeli date; utc date;
+begin
+  israeli := jerusalem_date('2030-03-01 22:30:00+00');                        -- 2030-03-02
+  utc     := (timestamptz '2030-03-01 22:30:00+00' at time zone 'UTC')::date; -- 2030-03-01
+
+  -- #38: critical fires on the Israeli date and not on the UTC one
+  select risk_level || '/' || days_to_deadline into got
+  from course_risk(israeli) where course_id = '38200000-0000-4000-8000-000000000003';
+  if got is distinct from 'critical/13' then
+    raise exception 'FAIL: CritEdge on the Israeli date ranked %, expected critical/13', got;
+  end if;
+  select risk_level || '/' || days_to_deadline into got
+  from course_risk(utc) where course_id = '38200000-0000-4000-8000-000000000003';
+  if got is distinct from 'none/14' then
+    raise exception 'FAIL: CritEdge fixture is not discriminating (UTC date ranked %)', got;
+  end if;
+
+  -- #38: stale_cancellations counts Israeli civil days, strictly more than 7.
+  -- Cancelled on Israeli 03-02: not stale on 03-09 (exactly 7), stale on 03-10.
+  -- The UTC reading (03-01) would already call it stale on 03-09.
+  select stale_cancellations || '/' || risk_level into got
+  from course_risk(date '2030-03-09') where course_id = '38200000-0000-4000-8000-000000000004';
+  if got is distinct from '0/none' then
+    raise exception 'FAIL: cancellation exactly 7 Israeli days old counted stale (%)', got;
+  end if;
+  select stale_cancellations || '/' || risk_level into got
+  from course_risk(date '2030-03-10') where course_id = '38200000-0000-4000-8000-000000000004';
+  if got is distinct from '1/high' then
+    raise exception 'FAIL: cancellation 8 Israeli days old not counted stale (%)', got;
+  end if;
+
+  -- #38: no_recent_session counts Israeli civil days, strictly more than 21.
+  -- Done on Israeli 03-02: not medium on 03-23 (exactly 21), medium on 03-24.
+  select risk_level::text into got
+  from course_risk(date '2030-03-23') where course_id = '38200000-0000-4000-8000-000000000005';
+  if got is distinct from 'none' then
+    raise exception 'FAIL: exactly 21 Israeli days since last session ranked %', got;
+  end if;
+  select risk_level::text into got
+  from course_risk(date '2030-03-24') where course_id = '38200000-0000-4000-8000-000000000005';
+  if got is distinct from 'medium' then
+    raise exception 'FAIL: 22 Israeli days since last session ranked %, expected medium', got;
+  end if;
+
+  -- #42: no deadline -> no `critical`, days_to_deadline NULL (never 0)
+  for r in
+    select * from (values
+      ('38200000-0000-4000-8000-000000000001', 'none/-'),
+      ('38200000-0000-4000-8000-000000000002', 'info/wedding_approaching')
+    ) as t(course_id, want)
+  loop
+    select risk_level || '/' || coalesce(risk_reason_code, '-')
+           || case when days_to_deadline is null then '' else '/days=' || days_to_deadline end
+      into got
+    from course_risk(date '2030-03-02') where course_id = r.course_id::uuid;
+    if got is distinct from r.want then
+      raise exception 'FAIL (#42): no-deadline course % ranked %, expected % with NULL days_to_deadline',
+        r.course_id, got, r.want;
+    end if;
+  end loop;
+
+  -- soft-deleted bride: her course does not rank
+  if exists (select 1 from course_risk(date '2030-03-02')
+             where course_id = '38200000-0000-4000-8000-000000000007') then
+    raise exception 'FAIL: a soft-deleted bride''s course still ranks';
+  end if;
+
+  raise notice 'PASS: tier boundaries resolve in Israeli civil days; a course with no deadline is not critical and reports NULL days';
+end $$;
+
+-- ---------- the live view: Israeli today, whatever the session timezone ----------
+-- Pacific/Kiritimati (UTC+14) and Etc/GMT+12 (UTC-12) are 26 hours apart, so
+-- their `current_date`s ALWAYS differ. A view that read the session clock
+-- cannot give both sessions the same days_to_deadline; this one must.
+do $$
+declare a int; b int; n int;
+begin
+  set local timezone = 'Pacific/Kiritimati';
+  select days_to_deadline into a from v_course_risk where course_id = '38200000-0000-4000-8000-000000000006';
+  set local timezone = 'Etc/GMT+12';
+  select days_to_deadline into b from v_course_risk where course_id = '38200000-0000-4000-8000-000000000006';
+  -- LiveClock's deadline was seeded as jerusalem_date(now()) + 20
+  if a is distinct from 20 or b is distinct from 20 then
+    raise exception 'FAIL: v_course_risk days_to_deadline depends on the session timezone (UTC+14: %, UTC-12: %, want 20)', a, b;
+  end if;
+
+  -- #42 through the view: the null deadline is null, never 0, never critical
+  select count(*) into n from v_course_risk
+  where course_id in ('38200000-0000-4000-8000-000000000001', '38200000-0000-4000-8000-000000000002')
+    and (days_to_deadline is not null or risk_level = 'critical');
+  if n <> 0 then
+    raise exception 'FAIL (#42): v_course_risk reports a deadline-less course as critical or with a day count';
+  end if;
+
+  -- the view is exactly course_risk on the Israeli date
+  select count(*) into n from (
+    (select * from v_course_risk except select * from course_risk(jerusalem_date(now())))
+    union all
+    (select * from course_risk(jerusalem_date(now())) except select * from v_course_risk)
+  ) diff;
+  if n <> 0 then
+    raise exception 'FAIL: v_course_risk differs from course_risk(jerusalem_date(now())) in % rows', n;
+  end if;
+
+  -- RLS applies inside the function: tenant E sees only its own rows
+  select count(*) into n from course_risk(jerusalem_date(now()))
+  where tenant_id <> '38000000-0000-4000-8000-0000000000e0';
+  if n <> 0 then raise exception 'FAIL: course_risk leaked % rows across tenants', n; end if;
+
+  raise notice 'PASS: v_course_risk counts days on the Israeli clock regardless of session timezone';
+end $$;
+
+-- tenant A cannot reach tenant E's rows through the function either
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int;
+begin
+  select count(*) into n from course_risk(date '2030-03-02')
+  where course_id = '38200000-0000-4000-8000-000000000003';
+  if n <> 0 then raise exception 'FAIL: tenant A read tenant E risk by course_id'; end if;
+  select count(*) into n from course_risk(jerusalem_date(now()));
+  if n <> 6 then raise exception 'FAIL: tenant A sees % course_risk rows, expected its own 6', n; end if;
+  raise notice 'PASS: course_risk is tenant-isolated by RLS, including by course_id';
+end $$;
+
+-- ---------- the nightly job's reading (§8.4) ----------
+-- pg_cron runs as the database owner, outside any JWT, in a UTC session, and
+-- reads v_course_risk directly. Assert the corrected tiers from exactly that
+-- position: superuser, no claims, a session timezone far from Israel.
+reset role;
+reset request.jwt.claims;
+do $$
+declare r record; got text;
+begin
+  set local timezone = 'Etc/GMT+12';
+  for r in
+    select * from (values
+      -- the original five §8.1 fixtures (tenant A)
+      ('a2000000-0000-4000-8000-0000000000c1','critical/wont_finish_in_time'),
+      ('a2000000-0000-4000-8000-0000000000d1','high/cancelled_not_rescheduled'),
+      ('a2000000-0000-4000-8000-0000000000e1','medium/no_recent_session'),
+      ('a2000000-0000-4000-8000-0000000000f1','info/wedding_approaching'),
+      ('a2000000-0000-4000-8000-00000000000b','none/-'),
+      -- #42 (tenant E)
+      -- (no wedding, no deadline, three sessions left: 0001 called this critical)
+      ('38200000-0000-4000-8000-000000000001','none/-')
+    ) as t(course_id, want)
+  loop
+    select risk_level || '/' || coalesce(risk_reason_code, '-') into got
+    from v_course_risk where course_id = r.course_id::uuid;
+    if got is distinct from r.want then
+      raise exception 'FAIL: nightly-job read of course % gave %, expected %', r.course_id, got, r.want;
+    end if;
+  end loop;
+
+  select days_to_deadline::text into got from v_course_risk
+  where course_id = '38200000-0000-4000-8000-000000000006';
+  if got is distinct from '20' then
+    raise exception 'FAIL: nightly-job read of LiveClock gave % days, expected 20', got;
+  end if;
+
+  raise notice 'PASS: the nightly job''s position (owner, no JWT, foreign session timezone) reads the corrected tiers';
+end $$;
+reset timezone;
+-- =============================================================
+-- END #38 + #42
+-- =============================================================
+
+-- =============================================================
+-- BEGIN #35 — today_screen: one aggregated query, one access_log fan-out
+-- Requires migrations 0003 (course_risk) and 0004_today_screen.sql.
+-- =============================================================
+-- Tenants (literal: psql does not interpolate :vars inside DO blocks):
+--   F = 35000000-0000-4000-8000-0000000000f0  the caller
+--   G = 35000000-0000-4000-8000-0000000000a0  another tenant, must never appear
+--   H = 35000000-0000-4000-8000-0000000000b0  a tenant with no brides yet
+-- p_today = 2030-05-10 (Israel is on IDT, UTC+3). Sessions sit on both sides
+-- of Israeli midnight so the UTC reading of "today" selects different rows.
+
+reset role;
+reset request.jwt.claims;
+set timezone = 'UTC';
+
+insert into instructor (id, full_name, phone) values
+  ('35000000-0000-4000-8000-0000000000f0', 'Fruma (tenant F, #35)', '050-0000035'),
+  ('35000000-0000-4000-8000-0000000000a0', 'Gila (tenant G, #35)',  '050-0000036'),
+  ('35000000-0000-4000-8000-0000000000b0', 'Hadas (tenant H, #35)', '050-0000037');
+
+insert into bride (id, tenant_id, first_name, last_name, phone, wedding_date, status) values
+  -- F1: active course, session today, stale cancellation, open balance
+  ('35100000-0000-4000-8000-0000000000f1', '35000000-0000-4000-8000-0000000000f0', 'Avigail', 'Peretz',  '+972500000351', date '2030-07-15', 'active'),
+  -- F2: active course with no deadline, session just after Israeli midnight, fully paid
+  ('35100000-0000-4000-8000-0000000000f2', '35000000-0000-4000-8000-0000000000f0', 'Racheli', 'Mizrahi', '+972500000352', date '2030-08-01', 'active'),
+  -- F3: completed course with an open balance only
+  ('35100000-0000-4000-8000-0000000000f3', '35000000-0000-4000-8000-0000000000f0', 'Tamar',   'Aviv',    '+972500000353', date '2030-03-01', 'completed'),
+  -- F4: active course whose only session is TOMORROW in Israel (today in UTC)
+  ('35100000-0000-4000-8000-0000000000f4', '35000000-0000-4000-8000-0000000000f0', 'Shira',   'Levi',    '+972500000354', date '2030-10-01', 'active'),
+  -- F5: a lead with no course — nothing about her is in the document
+  ('35100000-0000-4000-8000-0000000000f5', '35000000-0000-4000-8000-0000000000f0', 'Leah',    null,      '+972500000355', null,             'lead'),
+  -- F6: soft-deleted, with an active course, a session today and a balance
+  ('35100000-0000-4000-8000-0000000000f6', '35000000-0000-4000-8000-0000000000f0', 'Deleted', null,      '+972500000356', date '2030-06-01', 'active'),
+  -- G1: tenant G's bride, shaped to appear in every section if RLS failed
+  ('35100000-0000-4000-8000-0000000000a1', '35000000-0000-4000-8000-0000000000a0', 'Gviria',  'Other',   '+972500000361', date '2030-05-20', 'active');
+update bride set deleted_at = now() where id = '35100000-0000-4000-8000-0000000000f6';
+
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, agreed_price, status) values
+  ('35200000-0000-4000-8000-0000000000f1', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f1', '{}', date '2030-06-30', 3000, 'active'),
+  ('35200000-0000-4000-8000-0000000000f2', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f2', '{}', null,              1000, 'active'),
+  ('35200000-0000-4000-8000-0000000000f3', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f3', '{}', date '2030-02-15', 2000, 'completed'),
+  ('35200000-0000-4000-8000-0000000000f4', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f4', '{}', date '2030-09-01', null, 'active'),
+  ('35200000-0000-4000-8000-0000000000f6', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f6', '{}', date '2030-05-20', 900,  'active'),
+  -- F1's earlier, cancelled course: owes nothing on this screen
+  ('35200000-0000-4000-8000-0000000000f7', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f1', '{}', date '2030-01-01', 5000, 'cancelled'),
+  ('35200000-0000-4000-8000-0000000000a1', '35000000-0000-4000-8000-0000000000a0', '35100000-0000-4000-8000-0000000000a1', '{}', date '2030-05-15', 4000, 'active');
+
+insert into session (id, tenant_id, course_id, order_index, scheduled_at, location, status) values
+  -- F1: done, stale-cancelled (Israeli 05-02: stale on 05-10, not on 05-09), today, future
+  ('35300000-0000-4000-8000-0000000000f1', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 1, timestamptz '2030-05-01 15:00:00+00', 'Herzl 14', 'done'),
+  ('35300000-0000-4000-8000-0000000000f2', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 2, timestamptz '2030-05-02 10:00:00+00', 'Herzl 14', 'cancelled'),
+  ('35300000-0000-4000-8000-0000000000f3', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 3, timestamptz '2030-05-10 14:00:00+00', 'Herzl 14', 'planned'),
+  ('35300000-0000-4000-8000-0000000000f4', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 4, timestamptz '2030-05-17 14:00:00+00', 'Herzl 14', 'planned'),
+  -- F2: 2030-05-09 21:30Z = 05-10 00:30 in Israel -> TODAY (UTC would say yesterday)
+  ('35300000-0000-4000-8000-0000000000f5', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f2', 1, timestamptz '2030-05-09 21:30:00+00', 'Zoom',     'planned'),
+  -- F4: 2030-05-10 21:30Z = 05-11 00:30 in Israel -> NOT today (UTC would say today)
+  ('35300000-0000-4000-8000-0000000000f6', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f4', 1, timestamptz '2030-05-10 21:30:00+00', null,       'planned'),
+  -- F1 today but cancelled: not a meeting that is happening
+  ('35300000-0000-4000-8000-0000000000f7', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 5, timestamptz '2030-05-10 08:00:00+00', null,       'cancelled'),
+  -- F6 (deleted bride): today
+  ('35300000-0000-4000-8000-0000000000f8', '35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f6', 1, timestamptz '2030-05-10 09:00:00+00', null,       'planned'),
+  -- G1: today
+  ('35300000-0000-4000-8000-0000000000a1', '35000000-0000-4000-8000-0000000000a0', '35200000-0000-4000-8000-0000000000a1', 1, timestamptz '2030-05-10 12:00:00+00', 'Elsewhere', 'planned');
+
+insert into payment (tenant_id, course_id, amount, currency, method, paid_at) values
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1', 1000, 'ILS', 'bit',      date '2030-05-01'),
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1',  500, 'ILS', 'check',    date '2030-05-20'),  -- post-dated: not paid yet on 05-10
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f1',  100, 'USD', 'transfer', date '2030-05-01'),  -- foreign currency: excluded, counted
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f2', 1000, 'ILS', 'cash',     date '2030-04-01'),  -- F2 fully paid
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f3',  600, 'ILS', 'cash',     date '2030-01-10'),
+  ('35000000-0000-4000-8000-0000000000a0', '35200000-0000-4000-8000-0000000000a1',  250, 'ILS', 'cash',     date '2030-05-01');
+-- F8: a completed course fully paid in ILS, plus one USD payment. She owes
+-- nothing and is in no list, but her USD payment is counted into
+-- other_currency_payment_count, so her data IS in the document and she must
+-- be logged (security review of #35).
+insert into bride (id, tenant_id, first_name, status) values
+  ('35100000-0000-4000-8000-0000000000f8', '35000000-0000-4000-8000-0000000000f0', 'Paid', 'completed');
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, agreed_price, status) values
+  ('35200000-0000-4000-8000-0000000000f8', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f8', '{}', date '2030-01-01', 800, 'completed');
+insert into payment (tenant_id, course_id, amount, currency, method, paid_at) values
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f8', 800, 'ILS', 'cash',     date '2029-12-01'),
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f8',  50, 'USD', 'transfer', date '2029-12-01');
+-- Expected for F on 2030-05-10: F1 owes 3000-1000 = 2000, F3 owes 2000-600 = 1400
+-- -> outstanding_total 3400.00 over 2 courses / 2 brides; 2 foreign-currency
+-- payments (F1's and F8's).
+
+-- ---------- shape: invoker-rights function, pinned search_path, narrow grants ----------
+do $$
+declare f pg_proc%rowtype;
+begin
+  select * into f from pg_proc where oid = to_regprocedure('public.today_screen(date,text)');
+  if f.oid is null then raise exception 'FAIL: today_screen(date, text) is missing'; end if;
+  if f.prosecdef then
+    raise exception 'FAIL: today_screen is SECURITY DEFINER - RLS would not apply (invariant 1)';
+  end if;
+  if f.prokind <> 'f' then raise exception 'FAIL: today_screen is not a plain function'; end if;
+  if f.prorettype <> 'jsonb'::regtype then raise exception 'FAIL: today_screen does not return jsonb'; end if;
+  if f.proconfig is null
+     or not exists (select 1 from unnest(f.proconfig) c where c like 'search_path=%') then
+    raise exception 'FAIL: today_screen does not pin search_path';
+  end if;
+  if exists (select 1 from unnest(f.proargnames) a where a in ('p_id','p_instructor_id','p_tenant_id')) then
+    raise exception 'FAIL: today_screen takes a caller-supplied tenant id';
+  end if;
+  if not has_function_privilege('authenticated', f.oid, 'execute') then
+    raise exception 'FAIL: authenticated cannot execute today_screen';
+  end if;
+  if has_function_privilege('anon', f.oid, 'execute') then
+    raise exception 'FAIL: anon can execute today_screen';
+  end if;
+  if has_function_privilege('service_role', f.oid, 'execute') then
+    raise exception 'FAIL: service_role can execute today_screen (invariant 5)';
+  end if;
+  if exists (select 1 from aclexplode(f.proacl) a where a.grantee = 0) then
+    raise exception 'FAIL: today_screen is executable by PUBLIC';
+  end if;
+  raise notice 'PASS: today_screen is invoker-rights, returns jsonb, search_path-pinned, granted only to authenticated';
+end $$;
+
+-- ---------- the document, as tenant F ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"35000000-0000-4000-8000-0000000000f0"}';
+
+create temp table today35 (label text primary key, doc jsonb);
+
+do $$
+declare doc jsonb; got text; c jsonb; s jsonb;
+begin
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-000000000510');
+  insert into today35 values ('f0510', doc);
+
+  -- top-level and per-element key sets are the contract (lib/data/today.ts)
+  select string_agg(k, ',' order by k) into got from jsonb_object_keys(doc) k;
+  if got <> 'courses,payments,sessions_today,timezone,today' then
+    raise exception 'FAIL: today_screen top-level keys changed -> %', got;
+  end if;
+  if doc ->> 'today' <> '2030-05-10' or doc ->> 'timezone' <> 'Asia/Jerusalem' then
+    raise exception 'FAIL: today/timezone not echoed (% / %)', doc ->> 'today', doc ->> 'timezone';
+  end if;
+
+  -- courses: the aggregate, never the verdict
+  if jsonb_typeof(doc -> 'courses') <> 'array' then raise exception 'FAIL: courses is not an array'; end if;
+  for c in select * from jsonb_array_elements(doc -> 'courses') loop
+    select string_agg(k, ',' order by k) into got from jsonb_object_keys(c) k;
+    if got <> 'bride_first_name,bride_id,bride_last_name,course_id,last_done_at,last_done_on,'
+              'sessions_done,sessions_remaining,stale_cancellations,target_end_date,wedding_date' then
+      raise exception 'FAIL: courses[] keys changed -> %', got;
+    end if;
+    if c ? 'risk_level' or c ? 'risk_reason_code' or c ? 'days_to_deadline' then
+      raise exception 'FAIL: today_screen returned the risk verdict, not the aggregate';
+    end if;
+  end loop;
+
+  -- every active course of a live bride, in order: target_end_date nulls last
+  select string_agg(e ->> 'course_id', ',' order by ord) into got
+  from jsonb_array_elements(doc -> 'courses') with ordinality as t(e, ord);
+  if got is distinct from '35200000-0000-4000-8000-0000000000f1,'
+                          '35200000-0000-4000-8000-0000000000f4,'
+                          '35200000-0000-4000-8000-0000000000f2' then
+    raise exception 'FAIL: courses list is %, expected F1, F4, F2 (active, live brides only)', got;
+  end if;
+
+  select e into c from jsonb_array_elements(doc -> 'courses') e
+  where e ->> 'course_id' = '35200000-0000-4000-8000-0000000000f1';
+  if (c ->> 'sessions_remaining')::int <> 2 or (c ->> 'sessions_done')::int <> 1
+     or (c ->> 'stale_cancellations')::int <> 1
+     or c ->> 'last_done_on' <> '2030-05-01'
+     or c ->> 'target_end_date' <> '2030-06-30'
+     or c ->> 'wedding_date' <> '2030-07-15'
+     or c ->> 'bride_first_name' <> 'Avigail' then
+    raise exception 'FAIL: F1 aggregate is wrong: %', c;
+  end if;
+  if jsonb_typeof(c -> 'sessions_remaining') <> 'number' then
+    raise exception 'FAIL: counts must be JSON numbers';
+  end if;
+
+  select e into c from jsonb_array_elements(doc -> 'courses') e
+  where e ->> 'course_id' = '35200000-0000-4000-8000-0000000000f2';
+  if jsonb_typeof(c -> 'target_end_date') <> 'null' then
+    raise exception 'FAIL: a missing deadline must arrive as JSON null (#42)';
+  end if;
+
+  -- sessions_today: the Israeli day, planned/done only, live brides only
+  if jsonb_typeof(doc -> 'sessions_today') <> 'array' then raise exception 'FAIL: sessions_today is not an array'; end if;
+  for s in select * from jsonb_array_elements(doc -> 'sessions_today') loop
+    select string_agg(k, ',' order by k) into got from jsonb_object_keys(s) k;
+    if got <> 'bride_first_name,bride_id,bride_last_name,bride_phone,course_id,duration_minutes,'
+              'location,order_index,scheduled_at,session_id,status' then
+      raise exception 'FAIL: sessions_today[] keys changed -> %', got;
+    end if;
+  end loop;
+  select string_agg(e ->> 'session_id', ',' order by ord) into got
+  from jsonb_array_elements(doc -> 'sessions_today') with ordinality as t(e, ord);
+  if got is distinct from '35300000-0000-4000-8000-0000000000f5,35300000-0000-4000-8000-0000000000f3' then
+    raise exception 'FAIL: sessions_today is %, expected F2 00:30 then F1 17:00 (Israeli day, not UTC day)', got;
+  end if;
+
+  -- payments: one number, as a decimal string
+  select string_agg(k, ',' order by k) into got from jsonb_object_keys(doc -> 'payments') k;
+  if got <> 'currency,open_bride_count,open_course_count,other_currency_payment_count,outstanding_total' then
+    raise exception 'FAIL: payments keys changed -> %', got;
+  end if;
+  if jsonb_typeof(doc -> 'payments' -> 'outstanding_total') <> 'string' then
+    raise exception 'FAIL: outstanding_total must be a decimal string, never a float';
+  end if;
+  got := concat_ws('/', doc #>> '{payments,currency}', doc #>> '{payments,outstanding_total}',
+                   doc #>> '{payments,open_course_count}', doc #>> '{payments,open_bride_count}',
+                   doc #>> '{payments,other_currency_payment_count}');
+  if got <> 'ILS/3400.00/2/2/2' then
+    raise exception 'FAIL: payments summary is %, expected ILS/3400.00/2/2/2', got;
+  end if;
+
+  raise notice 'PASS: today_screen returns risk aggregate, Israeli-day sessions and payment total in one documented jsonb shape';
+end $$;
+
+-- ---------- RLS: nothing of tenant G, by id or by content ----------
+do $$
+declare doc jsonb := (select doc from today35 where label = 'f0510');
+begin
+  if doc::text like '%35000000-0000-4000-8000-0000000000a0%'
+     or doc::text like '%35100000-0000-4000-8000-0000000000a1%'
+     or doc::text like '%35200000-0000-4000-8000-0000000000a1%'
+     or doc::text like '%35300000-0000-4000-8000-0000000000a1%'
+     or doc::text like '%Gviria%' or doc::text like '%Elsewhere%' then
+    raise exception 'FAIL: tenant F''s today_screen contains tenant G data';
+  end if;
+  if doc::text like '%35100000-0000-4000-8000-0000000000f6%' or doc::text like '%Deleted%' then
+    raise exception 'FAIL: today_screen shows a soft-deleted bride';
+  end if;
+  raise notice 'PASS: today_screen under tenant F''s JWT returns nothing belonging to tenant G';
+end $$;
+
+-- ---------- access_log: one row per bride in the document, same request ----------
+do $$
+declare n int; got text;
+begin
+  select count(*), string_agg(bride_id::text, ',' order by bride_id) into n, got
+  from access_log where request_id = '35500000-0000-4000-8000-000000000510';
+  -- F1 (courses, sessions, payments), F2 (courses, sessions), F3 (payments),
+  -- F4 (courses), F8 (other_currency_payment_count only). Not F5 (nothing
+  -- about her is in the document), not F6 (soft-deleted).
+  if got is distinct from '35100000-0000-4000-8000-0000000000f1,35100000-0000-4000-8000-0000000000f2,'
+                          '35100000-0000-4000-8000-0000000000f3,35100000-0000-4000-8000-0000000000f4,'
+                          '35100000-0000-4000-8000-0000000000f8' then
+    raise exception 'FAIL: access_log fan-out is [%] (% rows), expected F1..F4 and F8 once each', got, n;
+  end if;
+  select count(*) into n from access_log
+  where request_id = '35500000-0000-4000-8000-000000000510'
+    and not (tenant_id = auth.uid() and actor_kind = 'instructor' and actor_id = auth.uid()
+             and action = 'read' and resource = 'today_screen');
+  if n <> 0 then raise exception 'FAIL: % access_log rows are mis-attributed', n; end if;
+  raise notice 'PASS: access_log gets exactly one row per bride in the document, attributed to the instructor';
+end $$;
+
+-- ---------- p_today is honoured, not decorative ----------
+do $$
+declare doc jsonb; got text;
+begin
+  doc := today_screen(date '2030-05-09', '35500000-0000-4000-8000-000000000509');
+  -- F1's cancellation (Israeli 05-02) is exactly 7 days old on 05-09: not stale
+  select e ->> 'stale_cancellations' into got from jsonb_array_elements(doc -> 'courses') e
+  where e ->> 'course_id' = '35200000-0000-4000-8000-0000000000f1';
+  if got is distinct from '0' then
+    raise exception 'FAIL: stale_cancellations on 2030-05-09 is %, expected 0 (p_today ignored?)', got;
+  end if;
+  -- no session falls on Israeli 05-09 (F2's 21:30Z is already 05-10 in Israel)
+  if jsonb_array_length(doc -> 'sessions_today') <> 0 then
+    raise exception 'FAIL: sessions_today on 2030-05-09 is %, expected none', doc -> 'sessions_today';
+  end if;
+
+  -- the post-dated cheque counts once its date has passed: F1 then owes 1500
+  doc := today_screen(date '2030-05-20', '35500000-0000-4000-8000-000000000520');
+  if doc #>> '{payments,outstanding_total}' <> '2900.00' then
+    raise exception 'FAIL: outstanding on 2030-05-20 is %, expected 2900.00', doc #>> '{payments,outstanding_total}';
+  end if;
+  raise notice 'PASS: p_today drives stale cancellations, the Israeli day of sessions and which payments count';
+end $$;
+
+-- ---------- refusals ----------
+do $$
+declare n int;
+begin
+  begin
+    perform today_screen(null, '35500000-0000-4000-8000-0000000000e1');
+    raise exception 'FAIL: today_screen accepted a null p_today';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform today_screen(date '2030-05-10', '  ');
+    raise exception 'FAIL: today_screen accepted a blank request id';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- request_id is written into access_log verbatim: it must be an identifier,
+  -- never a carrier for content (security review of #35)
+  begin
+    perform today_screen(date '2030-05-10', 'Gviria Other is pregnant, see notes');
+    raise exception 'FAIL: today_screen accepted free text as a request id';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform today_screen(date '2030-05-10', 'req-35-f-0510');
+    raise exception 'FAIL: today_screen accepted a non-uuid request id';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    -- a uuid with content smuggled after it
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-000000000510 pregnant');
+    raise exception 'FAIL: today_screen accepted a uuid with trailing text';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform today_screen(date '2030-05-10', E'35500000-0000-4000-8000-000000000510\npregnant');
+    raise exception 'FAIL: today_screen accepted a uuid followed by a newline and text';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- an impersonated support session must not be logged as the instructor
+  perform set_config('request.jwt.claims',
+    '{"sub":"35000000-0000-4000-8000-0000000000f0","impersonated_by":"5e000000-0000-4000-8000-000000000001"}', true);
+  begin
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-0000000000e2');
+    raise exception 'FAIL: today_screen ran under an impersonated session';
+  exception when sqlstate '42501' then null;
+  end;
+
+  perform set_config('request.jwt.claims', '{}', true);
+  begin
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-0000000000e3');
+    raise exception 'FAIL: today_screen ran without an authenticated caller';
+  exception when sqlstate '28000' then null;
+  end;
+end $$;
+
+-- ---------- tenant G sees only its own; tenant H (no brides) logs nothing ----------
+set request.jwt.claims = '{"sub":"35000000-0000-4000-8000-0000000000a0"}';
+do $$
+declare doc jsonb; n int;
+begin
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-00000000A510');
+  if doc::text like '%35000000-0000-4000-8000-0000000000f0%' or doc::text like '%Avigail%' then
+    raise exception 'FAIL: tenant G''s today_screen contains tenant F data';
+  end if;
+  if jsonb_array_length(doc -> 'courses') <> 1 or jsonb_array_length(doc -> 'sessions_today') <> 1
+     or doc #>> '{payments,outstanding_total}' <> '3750.00' then
+    raise exception 'FAIL: tenant G document is wrong: %', doc;
+  end if;
+  select count(*) into n from access_log where request_id like '35500000-%';
+  if n <> 1 then
+    raise exception 'FAIL: tenant G sees % of the #35 access_log rows, expected only its own 1', n;
+  end if;
+  -- an upper-case uuid is accepted and stored in canonical lower case
+  select count(*) into n from access_log where request_id = '35500000-0000-4000-8000-00000000a510';
+  if n <> 1 then
+    raise exception 'FAIL: request id was not stored lower-cased';
+  end if;
+end $$;
+
+set request.jwt.claims = '{"sub":"35000000-0000-4000-8000-0000000000b0"}';
+do $$
+declare doc jsonb; n int;
+begin
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-00000000b510');
+  if doc -> 'courses' <> '[]'::jsonb or doc -> 'sessions_today' <> '[]'::jsonb
+     or doc #>> '{payments,outstanding_total}' <> '0.00'
+     or (doc #>> '{payments,open_course_count}')::int <> 0 then
+    raise exception 'FAIL: empty tenant document is %, expected empty arrays and 0.00', doc;
+  end if;
+  select count(*) into n from access_log where request_id = '35500000-0000-4000-8000-00000000b510';
+  if n <> 0 then raise exception 'FAIL: an empty Today wrote % access_log rows; nothing was disclosed', n; end if;
+  raise notice 'PASS: tenant G sees only its own Today; an empty Today is well-formed and logs nothing';
+end $$;
+
+-- ---------- counted as superuser: the refusals logged nothing, G1 never logged under F ----------
+reset role;
+reset request.jwt.claims;
+do $$
+declare n int;
+begin
+  select count(*) into n from access_log
+  where request_id in ('35500000-0000-4000-8000-0000000000e1', '  ', '35500000-0000-4000-8000-0000000000e2', '35500000-0000-4000-8000-0000000000e3',
+                       'Gviria Other is pregnant, see notes', 'req-35-f-0510')
+     or request_id like '%pregnant%'
+     or (resource = 'today_screen'
+         and request_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+  if n <> 0 then raise exception 'FAIL: a refused today_screen call wrote % access_log rows', n; end if;
+  select count(*) into n from access_log
+  where request_id like '35500000-%' and bride_id = '35100000-0000-4000-8000-0000000000a1'
+    and tenant_id <> '35000000-0000-4000-8000-0000000000a0';
+  if n <> 0 then raise exception 'FAIL: tenant G''s bride was logged under another tenant'; end if;
+  raise notice 'PASS: refused calls write nothing; every fan-out row belongs to its caller''s tenant';
+end $$;
+
+drop table today35;
+reset timezone;
+-- =============================================================
+-- END #35
+-- =============================================================

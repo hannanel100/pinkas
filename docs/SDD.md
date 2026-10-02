@@ -505,6 +505,11 @@ Implemented in `v_course_risk` (in `schema.sql`) and mirrored by a pure TS funct
 
 Evaluated in that order; the first match wins.
 
+Two readings the table leaves implicit, both fixed in migration `0003` and asserted in both suites:
+
+* **The clock is the Israeli civil date** (§9.4), never the database session's. The view is `course_risk(jerusalem_date(now()))`, and every threshold — including ">7 days ago" and ">21 days since" — is a civil-day comparison, so the view and `risk.ts` agree on the boundary day as well as either side of it.
+* **A course with no `target_end_date` has no `critical` tier** and its `days_to_deadline` is null, never `0` — there is no deadline to miss. It still ranks on the other tiers. (Postgres `greatest()` ignores nulls rather than propagating them, which is how the original view ranked such a course `critical`; the view now handles the null explicitly.)
+
 ### 8.2 Computed on read, never stored
 
 `v_course_risk` is a view. The ranking is derived at query time from sessions and dates, so it cannot be stale — there is no job whose failure silently leaves the Today screen showing yesterday's truth. Given the data volume (PRD §3: 10–20 brides per instructor, 50+ for the professional persona), this is comfortably cheap; the supporting indexes are in `schema.sql`.
