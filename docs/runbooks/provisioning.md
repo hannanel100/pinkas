@@ -111,13 +111,14 @@ secret goes.
    ```
 
 6. **Live RLS verification** (real JWTs — the first contact of invariant 1
-   with a real auth.uid()). In your shell, set for one session, values from
-   the staging dashboard only: LIVE_SUPABASE_URL, LIVE_SUPABASE_ANON_KEY,
-   LIVE_SUPABASE_SERVICE_ROLE_KEY. Then:
+   with a real auth.uid()). In your shell, for one session, values from the
+   staging dashboard only: LIVE_SUPABASE_URL, LIVE_SUPABASE_ANON_KEY,
+   LIVE_SUPABASE_SERVICE_ROLE_KEY. Enter the service-role key with `read -rs`,
+   so it is neither echoed nor left in shell history:
 
    ```bash
+   read -rs LIVE_SUPABASE_SERVICE_ROLE_KEY; export LIVE_SUPABASE_SERVICE_ROLE_KEY
    PINKAS_LIVE_TEST=staging node scripts/test-live-rls.mjs
-   # and when done:
    unset LIVE_SUPABASE_SERVICE_ROLE_KEY
    ```
 
