@@ -21,3 +21,18 @@ language sql stable as $$
 $$;
 
 grant usage on schema auth to authenticated, service_role;
+
+-- Supabase's default privileges (#31). A live project runs these for the
+-- migration role, so every object a migration creates in `public` arrives
+-- with ALL privileges for all three API roles unless a migration says
+-- otherwise. Emulated here so the suite starts from the platform's state,
+-- not from a cleaner one: without these lines, "anon holds nothing" would
+-- pass whether or not migration 0005 exists. (Applies to objects created by
+-- the role running this file, which is the role that runs the migrations.)
+grant usage on schema public to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on tables    to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on functions to anon, authenticated, service_role;

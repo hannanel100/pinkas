@@ -15,6 +15,14 @@
 # at the first migration.
 #
 # Usage:  ./scripts/test-schema.sh [database-url]
+#
+# Opt-in: SCHEMA_TEST_AS_MIGRATOR=1 applies the migrations as a NON-superuser
+# role shaped like Supabase's `postgres` (CREATEROLE, BYPASSRLS, owns the
+# database; see docs/schema.bootstrap.migrator.sql). A superuser skips every
+# ownership, membership and schema-privilege check, so a migration can pass
+# the default run and still fail on the live platform — 0006 did (PR #51).
+# The assertions themselves still run as superuser, as in the default run.
+# The role is cluster-wide: use a throwaway cluster or database server.
 set -euo pipefail
 
 DB_URL="${1:-${DATABASE_URL:-}}"
@@ -122,10 +130,14 @@ printf '  %s\n' "${migrations[@]}"
 # One psql session: the bootstrap (Supabase's auth.uid() and roles), then every
 # migration in order, then the assertions.
 psql_args=(-d "$DB_URL" -v ON_ERROR_STOP=1 -f docs/schema.bootstrap.sql)
+if [[ "${SCHEMA_TEST_AS_MIGRATOR:-0}" == "1" ]]; then
+  echo "migration role: pinkas_migrator (non-superuser, SCHEMA_TEST_AS_MIGRATOR=1)"
+  psql_args+=(-f docs/schema.bootstrap.migrator.sql)
+fi
 for path in "${migrations[@]}"; do
   psql_args+=(-f "$path")
 done
-psql_args+=(-f docs/schema.test.sql)
+psql_args+=(-c "reset role" -f docs/schema.test.sql)
 
 psql "${psql_args[@]}"
 
