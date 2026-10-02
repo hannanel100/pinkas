@@ -1238,8 +1238,14 @@ end $$;
 
 -- ---------- #31: objects created later are closed by default ----------
 -- Behavioural, not catalogue-reading: create one of each as the migration
--- role, inspect what the defaults gave them, and roll back.
+-- role, inspect what the defaults gave them, and roll back. The migration
+-- role is whoever owns the schema's tables — the superuser in the default
+-- run, pinkas_migrator under SCHEMA_TEST_AS_MIGRATOR=1 — because default
+-- privileges belong to the role that creates the object.
 begin;
+select format('set local role %I', relowner::regrole)
+from pg_class where oid = 'public.bride'::regclass
+\gexec
 create table public.probe31 (id int primary key);
 create sequence public.probe31_seq;
 create function public.probe31_fn() returns int language sql as 'select 1';
@@ -1287,6 +1293,44 @@ begin
   raise notice 'PASS: service_role keeps SELECT on every public relation except session_record';
 end $$;
 
+-- ---------- #31: service_role cannot erase or rewrite the audit trail ----------
+-- It holds BYPASSRLS, so privileges are the only thing between a service
+-- key and access_log. Append and read; nothing else.
+do $$
+declare p text;
+begin
+  foreach p in array array['UPDATE','DELETE','TRUNCATE','TRIGGER','REFERENCES'] loop
+    if has_table_privilege('service_role', 'public.access_log', p) then
+      raise exception 'FAIL: service_role holds % on access_log', p;
+    end if;
+  end loop;
+  if not has_table_privilege('service_role', 'public.access_log', 'INSERT')
+     or not has_table_privilege('service_role', 'public.access_log', 'SELECT') then
+    raise exception 'FAIL: service_role lost INSERT/SELECT on access_log';
+  end if;
+end $$;
+set role service_role;
+do $$
+begin
+  begin
+    delete from access_log;
+    raise exception 'FAIL: service_role deleted from access_log';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update access_log set action = 'rewritten';
+    raise exception 'FAIL: service_role rewrote access_log';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    truncate access_log;
+    raise exception 'FAIL: service_role truncated access_log';
+  exception when insufficient_privilege then null;
+  end;
+  raise notice 'PASS: service_role may append to and read access_log, never update, delete or truncate it';
+end $$;
+reset role;
+
 -- ---------- #34: the shape that makes the reader safe ----------
 do $$
 declare f pg_proc%rowtype; owner pg_roles%rowtype; col text; n int;
@@ -1309,6 +1353,12 @@ begin
   -- reader see every tenant's rows of it.
   select count(*) into n from pg_class where relowner = owner.oid;
   if n <> 0 then raise exception 'FAIL: session_record_reader owns % relation(s)', n; end if;
+  -- CREATE on public is lent for the ALTER ... OWNER hand-over only.
+  if has_schema_privilege('session_record_reader', 'public', 'CREATE') then
+    raise exception 'FAIL: session_record_reader kept CREATE on schema public after the hand-over';
+  end if;
+  select count(*) into n from pg_proc where proowner = owner.oid;
+  if n <> 1 then raise exception 'FAIL: session_record_reader owns % functions, expected only the reader', n; end if;
 
   -- the reader
   select * into f from pg_proc
@@ -1700,6 +1750,26 @@ begin
   select count(*) into n from access_log where request_id = '11111111-0000-4000-8000-000000000006';
   if n <> 1 then raise exception 'FAIL: the read-back of two records for one bride logged % rows, expected 1', n; end if;
 end $$;
+
+-- ---------- #34: a record's tenant must be its session's tenant ----------
+-- Foreign-key checks ignore RLS; before the composite FK, tenant A could
+-- insert a record under her own tenant_id onto tenant B's session id.
+insert into session (id, tenant_id, course_id, order_index, scheduled_at, status) values
+  ('b3000000-0000-4000-8000-0000000000bb', 'b0000000-0000-4000-8000-000000000002',
+   'b2000000-0000-4000-8000-000000000001', 2, now() + interval '9 days', 'planned');
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+begin
+  begin
+    insert into session_record (session_id, tenant_id, private_note)
+    values ('b3000000-0000-4000-8000-0000000000bb', 'a0000000-0000-4000-8000-000000000001', 'squatting');
+    raise exception 'FAIL: tenant A attached a record to tenant B''s session';
+  exception when foreign_key_violation then null;
+  end;
+  raise notice 'PASS: session_record cannot hang off another tenant''s session (composite FK)';
+end $$;
+reset role;
 
 -- ---------- #34: access_log CHECK, both branches ----------
 set role authenticated;

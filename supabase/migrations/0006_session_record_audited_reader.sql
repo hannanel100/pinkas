@@ -105,7 +105,48 @@
 --             viewing, and nothing private is returned.
 --           * Never `.upsert()` / `.select('private_note')` on the table:
 --             both now fail with 42501, by design.
+--
+-- 6. Composite foreign key (session_id, tenant_id) -> session(id,
+--    tenant_id). Foreign-key checks ignore RLS, so the single-column FK let
+--    a tenant INSERT a record (under her own tenant_id) hanging off another
+--    tenant's session id — no disclosure, but a row squatting on someone
+--    else's primary key, blocking that tenant's own record for the session.
+--    The pair must now agree. Backed by a unique (id, tenant_id) on session.
+--
+-- APPLYING THIS ON A LIVE PROJECT (PR #51 review)
+--
+-- The whole file is one explicit transaction. On a non-superuser migration
+-- role, a failure partway through without it would commit the earlier
+-- steps — and the observed partial state was read_session_records as
+-- SECURITY DEFINER owned by the MIGRATION role, which holds BYPASSRLS: the
+-- exact state point 3 forbids. With the transaction it is all or nothing.
+--
+-- Two privileges a superuser never notices are needed, and CI exercises both
+-- (SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh, a non-superuser
+-- CREATEROLE + BYPASSRLS role that owns the database):
+--   * ADMIN on `authenticated`, to grant it to session_record_reader.
+--     PG16+ no longer lets CREATEROLE alone grant membership in a role it
+--     did not create. Check BEFORE `supabase db push`, as the migration role:
+--
+--       select admin_option from pg_auth_members
+--        where roleid = 'authenticated'::regrole
+--          and member = 'postgres'::regrole;
+--
+--     It must return one row, `t`. No row or `f` means this migration will
+--     fail (atomically) on that project: stop and take it back to
+--     `database` — do not work around it by changing the owner.
+--   * CREATE on schema `public` for the NEW OWNER at the moment of
+--     ALTER FUNCTION ... OWNER TO (Postgres checks the new owner could have
+--     created it). Granted immediately before the hand-over and revoked
+--     immediately after, inside the same transaction; schema.test.sql
+--     asserts the role holds no CREATE afterwards. Requires the migration
+--     role to be able to grant CREATE on `public` — it can when it owns the
+--     database (`public` is owned by pg_database_owner):
+--
+--       select has_schema_privilege('postgres', 'public', 'CREATE WITH GRANT OPTION');
 -- =============================================================
+
+begin;
 
 -- ---------- the owner role ----------
 do $$
@@ -145,6 +186,14 @@ grant  select (session_id, tenant_id, created_at, updated_at, deleted_at)
        on public.session_record to authenticated, service_role;
 grant  select (covered_topic_ids, private_note, needs_review_note)
        on public.session_record to session_record_reader;
+
+-- ---------- session_record's tenant must be its session's tenant ----------
+alter table public.session
+  add constraint session_id_tenant_key unique (id, tenant_id);
+alter table public.session_record
+  add constraint session_record_session_tenant_fk
+  foreign key (session_id, tenant_id) references public.session (id, tenant_id)
+  on delete cascade;
 
 -- ---------- access_log: an instructor row is attributed to the tenant ----------
 alter table public.access_log
@@ -231,7 +280,11 @@ begin
 end
 $fn$;
 
+-- Hand-over. Postgres requires the new owner to hold CREATE on the schema;
+-- the reader role gets it for exactly this statement and no longer.
+grant  create on schema public to session_record_reader;
 alter function public.read_session_records(uuid[], uuid) owner to session_record_reader;
+revoke create on schema public from session_record_reader;
 
 comment on function public.read_session_records(uuid[], uuid) is
   'The only read path to session_record''s private columns (issue #34). '
@@ -301,3 +354,5 @@ comment on function public.upsert_session_record(uuid, uuid[], text, text) is
 
 revoke execute on function public.upsert_session_record(uuid, uuid[], text, text) from public, anon, service_role;
 grant  execute on function public.upsert_session_record(uuid, uuid[], text, text) to authenticated;
+
+commit;

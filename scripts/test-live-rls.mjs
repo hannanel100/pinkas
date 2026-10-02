@@ -133,6 +133,9 @@ async function fullSuite() {
   const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
 
   const runTag = Date.now();
+  // One request id for every access_log row this run writes on purpose, so
+  // the rows it leaves behind (see cleanup) can be told apart.
+  const runRequestId = randomUUID();
   const emailA = `pinkas-rls-a-${runTag}@example.com`;
   const emailB = `pinkas-rls-b-${runTag}@example.com`;
   // bcrypt truncates at 72 bytes and GoTrue 500s beyond it — keep under the limit
@@ -239,13 +242,13 @@ async function fullSuite() {
       check(!rec.error && rec.data?.length === 1, "session_record non-private columns: tenant A sees exactly one row", rec.error?.message ?? `got ${rec.data?.length}`);
       const both = await a.rpc("read_session_records", {
         p_session_ids: [ids.sessionA, ids.sessionB],
-        p_request_id: randomUUID(),
+        p_request_id: runRequestId,
       });
       const leaked = (both.data ?? []).some((r) => (r.private_note ?? "").startsWith("B "));
       check(!both.error && both.data?.length === 1 && !leaked, "audited reader: tenant A gets its own note, no tenant B note", both.error?.message ?? `got ${both.data?.length}`);
       const onlyB = await a.rpc("read_session_records", {
         p_session_ids: [ids.sessionB],
-        p_request_id: randomUUID(),
+        p_request_id: runRequestId,
       });
       check(!onlyB.error && onlyB.data?.length === 0, "audited reader: tenant B's record by primary key is zero rows", onlyB.error?.message ?? `got ${onlyB.data?.length}`);
     }
@@ -273,6 +276,7 @@ async function fullSuite() {
         bride_id: ids.brideA,
         action: "read",
         resource: "bride",
+        request_id: runRequestId,
       });
       check(!error, "access_log accepts the tenant's own insert", error?.message);
       const del = await a.from("access_log").delete().eq("tenant_id", A).select("id");
@@ -319,21 +323,28 @@ async function fullSuite() {
     }
   } finally {
     console.log("\n== cleanup ==");
-    await cleanup(admin, [A, B]);
+    await cleanup(admin, [A, B], runRequestId);
   }
 }
 
-async function cleanup(admin, tenantIds) {
+async function cleanup(admin, tenantIds, runRequestId) {
   const del = async (table, column) => {
     const { error } = await admin.from(table).delete().in(column, tenantIds);
     if (error) {
       console.error(`cleanup ${table}: ${error.message} — remove rows for tenants ${tenantIds.join(", ")} manually`);
     }
   };
-  await del("access_log", "tenant_id");
-  // Deleting instructors cascades through every tenant-scoped FK; access_log
-  // has no FK to instructor, hence the separate delete above.
+  // Deleting instructors cascades through every tenant-scoped FK. access_log
+  // has no FK and is deliberately LEFT BEHIND: since migration 0005 the
+  // service key holds no DELETE on it (a BYPASSRLS key that could erase the
+  // audit trail would defeat it), and the log is designed to outlive the
+  // data it describes. Staging holds fake data only; the rows are
+  // identifiable by the tenant ids and the run's request id printed here.
   await del("instructor", "id");
+  console.log(
+    `access_log rows from this run are kept: tenant_id in (${tenantIds.join(", ")}), ` +
+      `harness-written rows carry request_id ${runRequestId}`,
+  );
   for (const id of tenantIds) {
     const { error } = await admin.auth.admin.deleteUser(id);
     if (error) console.error(`cleanup auth user ${id}: ${error.message} — delete manually in the dashboard`);

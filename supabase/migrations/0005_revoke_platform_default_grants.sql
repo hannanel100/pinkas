@@ -60,8 +60,16 @@
 --   platform holds are the same, and `supabase db diff` stops reporting
 --   them. Function EXECUTE is NOT re-stated: functions grant service_role
 --   individually (0002 revokes it from bootstrap_instructor on purpose).
---   One narrowing is made elsewhere, by name: 0006 revokes service_role's
---   SELECT on session_record's three private columns.
+--   Two narrowings, each by name:
+--     * access_log (below): SELECT and INSERT only. UPDATE, DELETE,
+--       TRUNCATE, TRIGGER and REFERENCES are revoked. service_role holds
+--       BYPASSRLS, so with those privileges a service-key holder could
+--       erase or rewrite the audit trail that an instructor's JWT cannot
+--       touch; the log must outlive whoever it describes (SDD §3.11), and
+--       that includes the operator. Nothing in the product deletes from it;
+--       the staging harness leaves its rows behind (scripts/test-live-rls.mjs).
+--     * 0006 revokes service_role's SELECT on session_record's three
+--       private columns.
 --
 -- PUBLIC — EXECUTE on functions is a Postgres default (not Supabase's), and
 --   anon inherits through it. Revoked from every existing function this
@@ -90,6 +98,10 @@
 --   platform's default privileges for its own role (supabase_admin) cannot
 --   be altered by `postgres` and are not.
 -- =============================================================
+
+-- Atomic regardless of how the tooling batches the file: a half-applied
+-- privilege migration is a state nobody reviewed.
+begin;
 
 do $$
 declare
@@ -159,3 +171,8 @@ alter default privileges revoke execute on functions from public;
 -- service_role's default grants in `public` are intentionally left in place
 -- (see header). schema.test.sql asserts they are still there, so a later
 -- "tidy-up" that removes them is a visible decision, not an accident.
+
+-- ---------- service_role on access_log: append and read, nothing else ----------
+revoke update, delete, truncate, trigger, references on public.access_log from service_role;
+
+commit;
