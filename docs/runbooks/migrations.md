@@ -68,6 +68,22 @@ Per migration:
    ```bash
    PINKAS_LIVE_TEST=staging node scripts/test-live-rls.mjs
    ```
+   The harness deletes everything it seeded **except its `access_log` rows**:
+   since `0005` the service key cannot delete from the audit log, by design.
+   It prints the throwaway tenant ids and the run's `request_id` so those
+   rows can be recognised. Staging holds fake data only.
+
+   **Before pushing `0006`** (and any migration that creates a role or hands
+   an object to one), run as the migration role and confirm one row, `t`:
+   ```sql
+   select admin_option from pg_auth_members
+    where roleid = 'authenticated'::regrole and member = 'postgres'::regrole;
+   ```
+   No row, or `f`, means `0006` will fail on that project — atomically,
+   since the file is one transaction. Stop and take it back to `database`.
+   CI can rehearse a non-superuser apply:
+   `SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh` (throwaway cluster
+   only — it creates a cluster-wide role).
 3. **Production.**
    ```bash
    pnpm exec supabase link --project-ref <prod-ref>
@@ -111,15 +127,28 @@ migration that breaks this fails CI.
 
 A hosted project injects objects into `public` that no migration creates —
 today `public.rls_auto_enable()`, Supabase's auto-RLS event-trigger function.
-`verify-live-schema.sh` step 3 absorbs those, and only those, through a
-`PLATFORM_ALLOWLIST` at the top of the script: each entry matches the header
-of one diff statement about one named platform object. Anything else in the
-diff fails the step. Grants are deliberately not allowlisted — `0005` states
-them all, so a privilege difference is drift.
+`verify-live-schema.sh` step 3 absorbs those, and only those. A diff
+statement is absorbed only when the *whole statement* has an expected exact
+shape: single-line statements against anchored patterns (`PLATFORM_EXACT`),
+statements with a body by SHA-256 of their full text (`PLATFORM_PINNED`). A
+changed body, another overload, an `ALTER ... OWNER TO`, or a grant on any of
+our objects is drift. Grants on our objects are never allowlisted — `0005`
+states them all.
 
-Adding an entry is a reviewed change, not a way to get a green run: name the
-object, say where it comes from, and confirm it is owned by a platform role.
-The filter can be exercised without a project:
+A clean run requires the CLI's own "No schema changes found" marker; empty
+output without it fails, because it cannot be told from a broken run.
+
+**First run after #31 — pinning.** `PLATFORM_PINNED` ships empty, because the
+live `CREATE` statement for `rls_auto_enable()` has not been captured yet.
+The first step-3 run therefore fails, printing that statement labelled
+*unpinned platform candidate* with its hash. Compare it with Supabase's
+published definition; if it matches, add the hash to `PLATFORM_PINNED` in a
+reviewed commit and re-run. A later platform change to the function shows up
+the same way and is re-pinned the same way.
+
+Adding or pinning an entry is a reviewed change, not a way to get a green
+run: name the object, say where it comes from, and confirm it is owned by a
+platform role. The filter can be exercised without a project:
 
 ```bash
 bash scripts/verify-live-schema.sh --filter-diff < captured-diff.sql

@@ -16,45 +16,60 @@
 # Self-test of the step-3 filter, no project or Docker needed:
 #   bash scripts/verify-live-schema.sh --filter-diff < some-diff.sql
 # prints what the allowlist absorbed and what remains; exits 1 if anything
-# remains (i.e. genuine drift).
+# remains (genuine drift) or if the input held no statement at all.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --------------------------------------------------------------------------
-# Platform-object allowlist (#31).
+# Platform-object allowlist (#31; tightened after the PR #51 review).
 #
 # A hosted Supabase project injects objects into `public` that no migration
 # creates and the CLI's shadow database does not have. They are owned by the
 # platform's own role, so migrations neither can nor should manage them; the
 # diff must ignore them without going blind to everything else.
 #
-# Each entry is a case-insensitive extended regex matched against the HEADER
-# (first non-blank line) of one complete SQL statement of the diff, with
-# dollar-quoted bodies kept inside their statement. Matching the header, not
-# the whole text, is what keeps an entry about an object's own DDL from also
-# absorbing some other function whose body merely mentions it. A statement
-# is absorbed only if its header matches an entry; anything else is drift
-# and fails step 3.
-# Keep this list short and every entry justified — an entry that matches
-# broadly (a schema, a role, a privilege keyword) would hide real drift.
+# The diff is split into complete SQL statements (dollar-quoted bodies kept
+# inside their statement). A statement is absorbed only if the WHOLE
+# statement has an expected, exact shape — never because it merely mentions
+# a platform object. Two kinds of entry:
 #
-#   1. public.rls_auto_enable() — Supabase's auto-RLS event-trigger function
-#      (enables RLS on tables created through the dashboard). Owned by
-#      supabase_admin. Seen live on pinkas-staging (#27). Matches its
-#      CREATE/ALTER/COMMENT/GRANT/REVOKE statements and nothing else.
-#   2. `set check_function_bodies = off;` — a session setting migra prints
-#      before any function definition (here: entry 1's). Not a schema object.
+#   PLATFORM_EXACT  — case-insensitive extended regexes that must match the
+#                     whole statement, which must be a single line.
+#   PLATFORM_PINNED — SHA-256 of a whole multi-line statement (leading blank
+#                     lines dropped, trailing whitespace stripped per line).
+#                     Used where the statement carries a body: any change to
+#                     the body, signature, return type or options changes it.
 #
-# Deliberately NOT allowlisted: grants to anon, authenticated or
-# service_role. 0005 states every one of those explicitly, so a privilege
-# difference on our objects is drift worth failing for.
+# Entries, all for public.rls_auto_enable() — Supabase's auto-RLS
+# event-trigger function, owned by supabase_admin, seen on pinkas-staging (#27):
+#   1. Its CREATE OR REPLACE FUNCTION, pinned by hash. The list starts EMPTY
+#      on purpose: nobody has captured the live statement yet. On the first
+#      run step 3 fails and prints the statement with its hash, labelled an
+#      unpinned candidate; a human compares it with Supabase's published
+#      definition and, if it matches, pins the hash here in a reviewed
+#      commit. Any later change to it is drift until re-pinned.
+#   2. GRANT/REVOKE EXECUTE on exactly `"public"."rls_auto_enable"()` to/from
+#      exactly one platform role — the platform's own default ACL on its own
+#      function. It is an event-trigger function: not callable.
+#   3. `set check_function_bodies = off;` — the session setting migra prints
+#      before any function definition. Not a schema object.
+#
+# Not absorbed, deliberately: ALTER (including OWNER TO), DROP or COMMENT on
+# it; any other overload; any other function; any grant on our objects —
+# 0005 states every one of those explicitly, so a difference is drift.
+# Adding an entry is a reviewed change (docs/runbooks/migrations.md).
 # --------------------------------------------------------------------------
-RAE='"?public"?\."?rls_auto_enable"?[[:space:]]*\('
-PLATFORM_ALLOWLIST=(
-  "^(create([[:space:]]+or[[:space:]]+replace)?|alter|drop|comment[[:space:]]+on)[[:space:]]+function[[:space:]]+(if[[:space:]]+exists[[:space:]]+)?${RAE}"
-  "^(grant|revoke)[[:space:]].*[[:space:]]on[[:space:]]+function[[:space:]]+${RAE}"
-  '^set[[:space:]]+check_function_bodies[[:space:]]*=[[:space:]]*off[[:space:]]*;$'
+PLATFORM_EXACT=(
+  '(grant|revoke) execute on function "public"\."rls_auto_enable"\(\) (to|from) "(anon|authenticated|service_role|postgres)";'
+  'set check_function_bodies = off;'
 )
+PLATFORM_PINNED=(
+  # sha256 of the live `CREATE OR REPLACE FUNCTION public.rls_auto_enable()`
+  # statement, pinned after the first reviewed capture (see entry 1).
+)
+# Recognises a statement that is ABOUT the platform function, only to label
+# an unpinned one helpfully. It never absorbs anything.
+PLATFORM_CANDIDATE='^create or replace function public\.rls_auto_enable\(\)$'
 
 # Splits SQL on stdin into statements (records separated by NUL), treating
 # `;` inside a dollar-quoted body as part of the body. Line-based: migra ends
@@ -78,28 +93,45 @@ split_statements() {
   '
 }
 
-# Reads a diff on stdin. Prints absorbed and remaining statements; returns 1
-# if any statement is not covered by the allowlist.
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1; fi
+}
+
+# Reads a diff on stdin. Prints absorbed and remaining statements. Returns 0
+# only if every statement was absorbed AND there was at least one: an empty
+# diff is judged by the CLI's own "no schema changes" marker, not here.
 filter_diff() {
-  local stmt header pattern matched drift=0 absorbed=0
+  local stmt norm header hash pattern pin matched drift=0 absorbed=0
   while IFS= read -r -d '' stmt; do
     [[ "$stmt" =~ [^[:space:]] ]] || continue
-    header=$(printf '%s\n' "$stmt" | grep -m1 '[^[:space:]]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    norm=$(printf '%s\n' "$stmt" | sed -E 's/[[:space:]]+$//' | sed '/./,$!d')
+    header=$(printf '%s\n' "$norm" | head -n 1)
+    hash=$(printf '%s\n' "$norm" | sha256_stdin)
     matched=0
-    for pattern in "${PLATFORM_ALLOWLIST[@]}"; do
-      if printf '%s\n' "$header" | grep -Eqi -- "$pattern"; then matched=1; break; fi
+    if [[ "$norm" != *$'\n'* ]]; then
+      for pattern in "${PLATFORM_EXACT[@]}"; do
+        if printf '%s\n' "$norm" | grep -Eqix -- "$pattern"; then matched=1; break; fi
+      done
+    fi
+    for pin in "${PLATFORM_PINNED[@]+"${PLATFORM_PINNED[@]}"}"; do
+      if [[ "$hash" == "$pin" ]]; then matched=1; fi
     done
     if (( matched )); then
       absorbed=$((absorbed + 1))
       echo "allowlisted (platform-owned): $header"
     else
       drift=$((drift + 1))
-      echo "DRIFT:"
-      printf '%s\n' "$stmt"
+      if printf '%s\n' "$header" | grep -Eqi -- "$PLATFORM_CANDIDATE"; then
+        echo "DRIFT (unpinned platform candidate, sha256 $hash - verify against Supabase's definition before pinning):"
+      else
+        echo "DRIFT:"
+      fi
+      printf '%s\n' "$norm"
     fi
   done < <(split_statements)
   echo "$absorbed statement(s) allowlisted, $drift statement(s) of drift"
-  (( drift == 0 ))
+  (( drift == 0 && absorbed > 0 ))
 }
 
 if [[ "${1:-}" == "--filter-diff" ]]; then
@@ -151,8 +183,17 @@ if ! diff_sql=$(pnpm exec supabase db diff --linked --schema public 2>"$errlog")
   exit 1
 fi
 
+# Clean means the CLI SAID so. Empty stdout alone is not evidence: a CLI
+# change, a redirected stream or a silent failure would produce it too.
 if [[ ! "$diff_sql" =~ [^[:space:]] ]]; then
-  echo "OK: linked project matches local migrations (no schema changes found)"
+  if grep -qi "no schema changes found" "$errlog" || printf '%s\n' "$diff_sql" | grep -qi "no schema changes found"; then
+    echo "OK: linked project matches local migrations (CLI: no schema changes found)"
+  else
+    cat "$errlog" >&2
+    echo "FAIL: supabase db diff printed no SQL and no 'No schema changes found'" >&2
+    echo "      marker; a clean diff cannot be told from a broken one." >&2
+    exit 1
+  fi
 elif printf '%s\n' "$diff_sql" | filter_diff; then
   echo "OK: linked project matches local migrations, apart from allowlisted platform objects"
 else
