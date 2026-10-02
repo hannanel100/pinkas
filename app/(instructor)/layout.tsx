@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 
 import { fontVariables } from "@/app/fonts";
 import "@/app/globals.css";
+import { t } from "@/lib/i18n";
 
 /**
  * Root layout for Path 1 — the authenticated instructor app.
@@ -18,13 +19,11 @@ import "@/app/globals.css";
 
 export const metadata: Metadata = {
   // SDD §6.3 — neutral, names no subject matter. Her phone is not always
-  // private, and the title is visible in tab lists and screen shares. This is
-  // the application's own name rather than product copy; the translation layer
-  // (§11) is ticketed to `frontend`.
-  title: "פנקס",
-  applicationName: "פנקס",
+  // private, and the title is visible in tab lists and screen shares.
+  title: t.app.name,
+  applicationName: t.app.name,
   manifest: "/manifest.webmanifest",
-  appleWebApp: { capable: true, title: "פנקס", statusBarStyle: "default" },
+  appleWebApp: { capable: true, title: t.app.name, statusBarStyle: "default" },
 };
 
 export const viewport: Viewport = {

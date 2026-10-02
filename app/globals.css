@@ -33,14 +33,16 @@
    * The only chromatic tokens in the system. Only `components/risk/` may
    * reference them — enforced by eslint.config.mjs.
    *
-   * Verbatim from the sheet, per SDD §10.1. Note that risk-2 (3.94:1) and
-   * risk-3 (3.82:1) do not meet WCAG AA at the 11px `.risk-days` size that
-   * §18.2 requires — tracked in issue #5. Do not adjust these values here:
-   * §18.2's remedy is a design decision that lands with the SDD token table.
+   * SDD §10.1. risk-1 is the sheet's value; risk-2 and risk-3 are darkened
+   * from it (#5, SDD §18.2) because both failed WCAG AA at the 11px
+   * `.risk-days` size. Each clears 4.5:1 on `screen`, and the three step down
+   * in luminance with severity so the order survives greyscale. The thresholds
+   * are asserted by components/risk/contrast.test.ts — change a value here and
+   * that test is where you find out whether it is still legible.
    */
   --color-risk-1: #a81e32;
-  --color-risk-2: #c2691a;
-  --color-risk-3: #9c8000;
+  --color-risk-2: #9e5415;
+  --color-risk-3: #8a7100;
 
   /* Typography — SDD §10.3. Three families, each with one job. */
   --font-*: initial;

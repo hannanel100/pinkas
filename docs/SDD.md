@@ -564,7 +564,11 @@ PRD §10.2 and §11.1 note periods when weddings do not occur (Sefirat HaOmer, B
 
 The wireframes are unusually prescriptive, and the annotations state design *rules*, not just appearance. This section turns them into enforceable code.
 
-### 10.1 Tokens, taken verbatim from the sheet
+### 10.1 Tokens
+
+Taken verbatim from the sheet, with two exceptions: `risk.2` and `risk.3` are darkened from the
+sheet's `#C2691A` and `#9C8000`, because both failed WCAG AA at their actual 11px size (§18.2, #5).
+The hues are held; only the lightness moved.
 
 | Token | Value | Role |
 |---|---|---|
@@ -576,8 +580,8 @@ The wireframes are unusually prescriptive, and the annotations state design *rul
 | `wire-soft` | `#E4E7EB` | dividers, inactive fills |
 | `screen` | `#FFFFFF` | surface |
 | `risk.1` | `#A81E32` | critical |
-| `risk.2` | `#C2691A` | high |
-| `risk.3` | `#9C8000` | medium |
+| `risk.2` | `#9E5415` | high — sheet `#C2691A` |
+| `risk.3` | `#8A7100` | medium — sheet `#9C8000` |
 
 ### 10.2 The one-colour rule, enforced in the theme
 
@@ -605,6 +609,8 @@ Three families, with a rule the wireframe follows without stating:
 
 Every numeric or temporal value in all four plates is mono; no prose ever is. This is what makes "18 יום" and "₪2,400" read as data at a glance. Encoded as a `<Metric>` primitive rather than left to per-component discipline.
 
+Precisely: every *standalone* quantity is mono — the countdown, the time, the sum, the fraction, the section count. A number *inside a sentence* is prose, and the wireframe sets it so: "4 מפגשים נותרו · לא ייגמר בזמן" is Assistant throughout. And only the quantity is mono — in "18 יום" the `18` is a Metric and `יום` stays in Assistant. The string layer returns such copy as a `Phrase` (prose and metric segments), and `<Phrase>` in `components/ui/` renders the metric half through `<Metric>`.
+
 ### 10.4 Fonts
 
 Suez One, Assistant and IBM Plex Mono, **self-hosted via `next/font`**, subset to Hebrew + Latin. No runtime request to Google Fonts: it is a render-blocking third-party round trip against the 2-second budget (§18), and on portal routes it would place the page load in a third-party log (§6.3).
@@ -619,7 +625,7 @@ Suez One, Assistant and IBM Plex Mono, **self-hosted via `next/font`**, subset t
 * This enforces existing practice rather than introducing policy — `wireframes.html` already uses logical properties throughout (`border-inline-start` on risk cards, `inset-inline-start` on callouts).
 * Numerals, times and currency stay LTR inside RTL text; the `<Metric>` primitive (§10.3) sets `dir="ltr"` on its own content so `17:00` and `₪2,400` never reorder.
 * Icons implying direction (the back arrow, `→` in the wireframe's `.backbar`) mirror with direction.
-* All strings live in a translation layer from day one. Not for translation — for keeping copy out of components, so the risk sentences in §8.3 can be composed from reason codes.
+* All strings live in a translation layer from day one. Not for translation — for keeping copy out of components, so the risk sentences in §8.3 can be composed from reason codes. The layer is `lib/i18n/` (catalog in `he.ts`), and a lint rule makes a Hebrew literal anywhere under `app/` or `components/` an error. It owns Hebrew counting too, which concatenation gets wrong: "יום אחד", "יומיים", "9 ימים", "18 יום".
 
 ---
 
@@ -868,7 +874,10 @@ PRD §10.3: the home screen loads in **under 2 seconds on a cellular connection*
 
 ### 18.2 Accessibility
 
-* Contrast: the token set is high-contrast by construction (`ink #101418` on `screen #FFFFFF`). **The three risk colours must be verified against WCAG AA at their actual sizes** — `risk.3 #9C8000` on white is the one to check, since it is used at 11px in `.risk-days`. If it fails, darken the token rather than enlarging the text.
+* Contrast: the token set is high-contrast by construction (`ink #101418` on `screen #FFFFFF`). **The three risk colours must be verified against WCAG AA at their actual sizes** — they are used at 11px in `.risk-days`, which is normal text and needs 4.5:1. If a token fails, darken the token rather than enlarging the text.
+  * **Measured (#5):** this document anticipated `risk.3` failing; `risk.2` failed too, for the same reason. On `screen`, the sheet's values gave `risk.1 #A81E32` 7.25:1 (pass), `risk.2 #C2691A` 3.94:1 and `risk.3 #9C8000` 3.82:1 (both fail). Both were darkened, holding their hue: `risk.2 #9E5415` 5.63:1, `risk.3 #8A7100` 4.73:1. The three now also step down in luminance with severity, so their order survives greyscale. `graphite` (4.83:1), used for the reason sentence, passes unchanged.
+  * Measured against `screen`, not `paper`: product text renders on `screen`; `paper` is the desk behind the device frame.
+  * `components/risk/contrast.test.ts` reads the values from `app/globals.css` and asserts the 4.5:1 floor, so a token cannot drift back silently.
 * **Risk is never encoded by colour alone.** The wireframe already pairs every colour with a reason sentence and a day count (§8.3), so the information survives colour-blindness and greyscale. Preserve that pairing.
 * Full keyboard operability, visible focus, semantic landmarks, `lang="he"` and `dir="rtl"` on the document.
 * Screen-reader labels on icon-only controls, of which the wireframe has few by design.

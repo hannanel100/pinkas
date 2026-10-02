@@ -44,6 +44,9 @@ const PHYSICAL_PROPERTY =
 
 const RISK_TOKEN = /(?:^|[\s"'`-])risk-[123]\b/;
 
+// Any Hebrew letter. Product copy is Hebrew, and it lives in lib/i18n/.
+const HEBREW = /[\u0590-\u05FF]/;
+
 /* ── no-restricted-syntax fragments ──────────────────────────────────────── */
 
 /** Invariant 8 — RTL is the only direction. SDD §10.3, §11. */
@@ -80,6 +83,29 @@ const colourSyntax = [
     selector: "CallExpression[callee.name=/^(?:rgb|rgba|hsl|hsla|oklch)$/]",
     message:
       "Computed colour. The token set is closed (invariant 7), and only components/risk/ emits colour at all.",
+  },
+];
+
+/**
+ * Invariant 8 — strings live in a translation layer (SDD §11). Copy in a
+ * component cannot be composed from a reason code (§8.3), so a Hebrew literal
+ * under app/ or components/ is always a string that belongs in lib/i18n/he.ts.
+ */
+const copySyntax = [
+  {
+    selector: `Literal[value=${HEBREW.toString()}]`,
+    message:
+      "Hebrew string literal in a component. Copy lives in the translation layer (invariant 8, SDD §11) — add it to lib/i18n/he.ts and read it through `t`.",
+  },
+  {
+    selector: `TemplateElement[value.raw=${HEBREW.toString()}]`,
+    message:
+      "Hebrew string literal in a component. Copy lives in lib/i18n/he.ts (invariant 8, SDD §11).",
+  },
+  {
+    selector: `JSXText[value=${HEBREW.toString()}]`,
+    message:
+      "Hebrew copy in JSX. Copy lives in lib/i18n/he.ts (invariant 8, SDD §11).",
   },
 ];
 
@@ -210,6 +236,7 @@ const eslintConfig = defineConfig([
       "no-restricted-syntax": [
         "error",
         ...rtlSyntax,
+        ...copySyntax,
         ...colourSyntax,
         ...riskTokenSyntax,
       ],
@@ -221,7 +248,12 @@ const eslintConfig = defineConfig([
     name: "pinkas/risk-components",
     files: ["components/risk/**/*.{ts,tsx}"],
     rules: {
-      "no-restricted-syntax": ["error", ...rtlSyntax, ...colourSyntax],
+      "no-restricted-syntax": [
+        "error",
+        ...rtlSyntax,
+        ...copySyntax,
+        ...colourSyntax,
+      ],
     },
   },
 
