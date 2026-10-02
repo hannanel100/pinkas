@@ -564,7 +564,11 @@ PRD §10.2 and §11.1 note periods when weddings do not occur (Sefirat HaOmer, B
 
 The wireframes are unusually prescriptive, and the annotations state design *rules*, not just appearance. This section turns them into enforceable code.
 
-### 10.1 Tokens, taken verbatim from the sheet
+### 10.1 Tokens
+
+Taken verbatim from the sheet, with two exceptions: `risk.2` and `risk.3` are darkened from the
+sheet's `#C2691A` and `#9C8000`, because both failed WCAG AA at their actual 11px size (§18.2, #5).
+The hues are held; only the lightness moved.
 
 | Token | Value | Role |
 |---|---|---|
@@ -576,8 +580,8 @@ The wireframes are unusually prescriptive, and the annotations state design *rul
 | `wire-soft` | `#E4E7EB` | dividers, inactive fills |
 | `screen` | `#FFFFFF` | surface |
 | `risk.1` | `#A81E32` | critical |
-| `risk.2` | `#C2691A` | high |
-| `risk.3` | `#9C8000` | medium |
+| `risk.2` | `#9E5415` | high — sheet `#C2691A` |
+| `risk.3` | `#8A7100` | medium — sheet `#9C8000` |
 
 ### 10.2 The one-colour rule, enforced in the theme
 
@@ -868,7 +872,10 @@ PRD §10.3: the home screen loads in **under 2 seconds on a cellular connection*
 
 ### 18.2 Accessibility
 
-* Contrast: the token set is high-contrast by construction (`ink #101418` on `screen #FFFFFF`). **The three risk colours must be verified against WCAG AA at their actual sizes** — `risk.3 #9C8000` on white is the one to check, since it is used at 11px in `.risk-days`. If it fails, darken the token rather than enlarging the text.
+* Contrast: the token set is high-contrast by construction (`ink #101418` on `screen #FFFFFF`). **The three risk colours must be verified against WCAG AA at their actual sizes** — they are used at 11px in `.risk-days`, which is normal text and needs 4.5:1. If a token fails, darken the token rather than enlarging the text.
+  * **Measured (#5):** this document anticipated `risk.3` failing; `risk.2` failed too, for the same reason. On `screen`, the sheet's values gave `risk.1 #A81E32` 7.25:1 (pass), `risk.2 #C2691A` 3.94:1 and `risk.3 #9C8000` 3.82:1 (both fail). Both were darkened, holding their hue: `risk.2 #9E5415` 5.63:1, `risk.3 #8A7100` 4.73:1. The three now also step down in luminance with severity, so their order survives greyscale. `graphite` (4.83:1), used for the reason sentence, passes unchanged.
+  * Measured against `screen`, not `paper`: product text renders on `screen`; `paper` is the desk behind the device frame.
+  * `components/risk/contrast.test.ts` reads the values from `app/globals.css` and asserts the 4.5:1 floor, so a token cannot drift back silently.
 * **Risk is never encoded by colour alone.** The wireframe already pairs every colour with a reason sentence and a day count (§8.3), so the information survives colour-blindness and greyscale. Preserve that pairing.
 * Full keyboard operability, visible focus, semantic landmarks, `lang="he"` and `dir="rtl"` on the document.
 * Screen-reader labels on icon-only controls, of which the wireframe has few by design.
