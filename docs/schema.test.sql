@@ -2021,28 +2021,18 @@ begin
     raise exception 'FAIL: unfiltered portal_bride_view returned % rows, expected 2 (A live + B live)', n;
   end if;
 
-  -- !!! HARNESS-ONLY. THE NEXT TWO ASSERTIONS DO NOT HOLD IN PRODUCTION. !!!
-  -- schema.bootstrap.sql creates service_role with no table privileges at all,
-  -- so here it holds only what migrations grant it. On live Supabase,
-  -- service_role holds full default privileges on every table in `public`:
-  -- the portal key CAN read bride.phone and CAN read session_record —
-  -- private_note included — and RLS does not stop it (BYPASSRLS). These
-  -- checks prove only that 0007 granted nothing beyond the six bride columns.
-  -- They become production truths only once a migration revokes
-  -- service_role's table-level privileges on `bride` and `session_record`
-  -- (open decision on #37). Until then, invariant 2 against the service-role
-  -- key rests on lib/data/portal.ts never naming session_record (invariant 5
-  -- lint), not on the database. Do not cite these as evidence otherwise.
-  begin
-    perform phone from bride limit 1;
-    raise exception 'FAIL: service_role read bride.phone through 0007''s grants';
-  exception when insufficient_privilege then null;
-  end;
-  begin
-    perform 1 from session_record limit 1;
-    raise exception 'FAIL: service_role read session_record through migration grants';
-  exception when insufficient_privilege then null;
-  end;
+  -- The service role and the base tables. schema.bootstrap.sql models
+  -- Supabase's default privileges (#31), so service_role holds table-level
+  -- SELECT on `bride` here exactly as it does on live Supabase: the portal key
+  -- CAN read bride.phone, and RLS does not stop it (BYPASSRLS). 0007's column
+  -- grant narrows nothing until a migration revokes that table-level privilege
+  -- (#53). This assertion pins the current state, so the migration that lands
+  -- the revoke has to change it — and the 0007 header — in the same diff.
+  if not has_table_privilege('service_role', 'public.bride', 'SELECT') then
+    raise exception 'FAIL: service_role lost table-level SELECT on bride; update this assertion and the 0007 header together (#53)';
+  end if;
+  -- session_record's private columns are refused to service_role by 0006 and
+  -- asserted in the #31 / #34 section; nothing in 0007 touches session_record.
 
   raise notice 'PASS: portal_bride_view resolves live tokens only; column-narrowed, explicitly not tenant-isolated';
 end $$;

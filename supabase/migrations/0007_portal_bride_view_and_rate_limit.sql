@@ -55,8 +55,8 @@
 --     privileges on `bride` by default, so the key can still `select phone
 --     from bride` directly. The column-level grant below is the complete set
 --     this view needs; it narrows the service role only on a database where
---     service_role's table-level grant on `bride` has been revoked (an open
---     decision recorded on #37, deliberately not taken in this migration).
+--     service_role's table-level grant on `bride` has been revoked (tracked
+--     in #53, deliberately not taken in this migration; the #37 test pins it).
 --
 -- What it does buy: lib/data/portal.ts has no select list a developer can
 -- widen by typing one more column name; the portal surface is asserted by
