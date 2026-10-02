@@ -56,7 +56,7 @@ Per migration:
    the `schema.test.sql` suite against the bootstrap harness. Migration files
    live in `supabase/migrations/` and are never edited or deleted once applied
    anywhere. `0001_init.sql` specifically must remain byte-identical to
-   `docs/schema.sql`.
+   `docs/schema.sql` — see "What `docs/schema.sql` means" below.
 2. **Staging first.**
    ```bash
    pnpm exec supabase link --project-ref <staging-ref>   # prompts for db password
@@ -79,6 +79,51 @@ Per migration:
 4. **Record.** Comment on the PR or ticket: migration name(s), project ref,
    date, and the tail of the verify output. Applied-by-whom should never be a
    matter of memory.
+
+## What `docs/schema.sql` means (decided under #31)
+
+**The frozen initial state.** `docs/schema.sql` is the authoritative Phase 1
+schema document and is, byte for byte, `0001_init.sql`. It is not edited to
+follow later migrations. The current schema is `0001` plus every later
+migration in order — exactly what `scripts/test-schema.sh` builds for CI, and
+what steps 2 and 3 of `scripts/verify-live-schema.sh` compare against the
+live project. Step 1 of that script checks only the byte identity.
+
+Why not a maintained "current state" document: applied migrations are
+immutable and expand/contract means the deltas carry the reasoning; a
+hand-maintained full copy would be a second description that can disagree
+with the first, with nothing to say which is right. The executable statement
+of current behaviour is `docs/schema.test.sql`.
+
+## Grants: closed by default (decided under #31)
+
+From `0005` on, objects a migration creates in `public` arrive with **no**
+privileges for `anon`, `authenticated` or `PUBLIC`. Every migration grants
+explicitly, next to the `CREATE`, exactly what its access path needs —
+`authenticated` for instructor traffic, `service_role` for the portal path —
+and never grants to `anon`. A function `service_role` must not call needs an
+explicit `revoke execute ... from service_role`: the platform's default grant
+to `service_role` is deliberately kept (reasoning in `0005`'s header). The
+`#31` section of `schema.test.sql` enumerates every object in `public`, so a
+migration that breaks this fails CI.
+
+## The platform-object allowlist (decided under #31)
+
+A hosted project injects objects into `public` that no migration creates —
+today `public.rls_auto_enable()`, Supabase's auto-RLS event-trigger function.
+`verify-live-schema.sh` step 3 absorbs those, and only those, through a
+`PLATFORM_ALLOWLIST` at the top of the script: each entry matches the header
+of one diff statement about one named platform object. Anything else in the
+diff fails the step. Grants are deliberately not allowlisted — `0005` states
+them all, so a privilege difference is drift.
+
+Adding an entry is a reviewed change, not a way to get a green run: name the
+object, say where it comes from, and confirm it is owned by a platform role.
+The filter can be exercised without a project:
+
+```bash
+bash scripts/verify-live-schema.sh --filter-diff < captured-diff.sql
+```
 
 ## Rollback
 

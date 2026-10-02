@@ -1144,3 +1144,142 @@ reset timezone;
 -- =============================================================
 -- END #35
 -- =============================================================
+
+-- =============================================================
+-- BEGIN #31 / #34 — platform default grants; session_record's private columns
+-- Requires migration 0005_revoke_platform_default_grants.sql and the default-privilege
+-- emulation at the end of schema.bootstrap.sql (without it the #31
+-- assertions would pass vacuously).
+-- =============================================================
+-- Literal ids, as in the #36 section (psql does not interpolate :vars in DO):
+--   tenant A  a0000000-0000-4000-8000-000000000001   session a3...0001 (has a record)
+--   tenant B  b0000000-0000-4000-8000-000000000002   session b3...0001 (has a record)
+--   support engineer (impersonating A)  e0000000-0000-4000-8000-0000000000e1
+--   request ids 11111111-0000-4000-8000-00000000000N
+
+-- ---------- #31: anon holds nothing in `public` ----------
+do $$
+declare rel text; r record;
+begin
+  -- The bride-data relations, named, so the acceptance criterion is literal...
+  foreach rel in array array[
+    'instructor','curriculum','curriculum_topic','bride','course','session',
+    'session_record','material','payment','message_template','message_log',
+    'blackout_date','access_log','portal_session_view','v_course_risk']
+  loop
+    if to_regclass('public.' || rel) is null then
+      raise exception 'FAIL: expected relation public.% is missing', rel;
+    end if;
+    if has_table_privilege('anon', 'public.' || rel,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       or has_any_column_privilege('anon', 'public.' || rel, 'SELECT,INSERT,UPDATE,REFERENCES') then
+      raise exception 'FAIL: anon holds a privilege on bride-data relation %', rel;
+    end if;
+  end loop;
+
+  -- ...and every relation, sequence and function in `public`, so an object a
+  -- later migration adds without following 0005's rule fails here too.
+  for r in
+    select c.oid::regclass as obj, c.relkind
+    from pg_class c
+    where c.relnamespace = 'public'::regnamespace
+      and c.relkind in ('r','p','v','m','f','S')
+      and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass
+                      and d.objid = c.oid and d.deptype = 'e')
+  loop
+    if r.relkind = 'S' then
+      if has_sequence_privilege('anon', r.obj, 'USAGE,SELECT,UPDATE') then
+        raise exception 'FAIL: anon holds a privilege on sequence %', r.obj;
+      end if;
+      if has_sequence_privilege('authenticated', r.obj, 'USAGE,SELECT,UPDATE') then
+        raise exception 'FAIL: authenticated holds a privilege on sequence %', r.obj;
+      end if;
+    else
+      if has_table_privilege('anon', r.obj, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+         or has_any_column_privilege('anon', r.obj, 'SELECT,INSERT,UPDATE,REFERENCES') then
+        raise exception 'FAIL: anon holds a privilege on %', r.obj;
+      end if;
+      -- TRUNCATE would erase access_log past its missing DELETE policy (RLS
+      -- does not govern TRUNCATE); REFERENCES/TRIGGER are never needed.
+      if has_table_privilege('authenticated', r.obj, 'TRUNCATE,REFERENCES,TRIGGER') then
+        raise exception 'FAIL: authenticated holds TRUNCATE/REFERENCES/TRIGGER on %', r.obj;
+      end if;
+      if r.relkind in ('v','m')
+         and has_table_privilege('authenticated', r.obj, 'INSERT,UPDATE,DELETE') then
+        raise exception 'FAIL: authenticated can write through view %', r.obj;
+      end if;
+    end if;
+  end loop;
+
+  -- has_function_privilege('anon', ...) includes what anon inherits from
+  -- PUBLIC, which is how a function created with default ACLs leaks.
+  for r in
+    select p.oid::regprocedure as fn
+    from pg_proc p
+    where p.pronamespace = 'public'::regnamespace
+      and p.prokind in ('f','p')
+      and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass
+                      and d.objid = p.oid and d.deptype = 'e')
+  loop
+    if has_function_privilege('anon', r.fn, 'EXECUTE') then
+      raise exception 'FAIL: anon (directly or via PUBLIC) can execute %', r.fn;
+    end if;
+  end loop;
+
+  raise notice 'PASS: anon holds no privilege on any relation, sequence or function in public; authenticated holds no TRUNCATE/REFERENCES/TRIGGER, no view writes, no sequences';
+end $$;
+
+-- ---------- #31: objects created later are closed by default ----------
+-- Behavioural, not catalogue-reading: create one of each as the migration
+-- role, inspect what the defaults gave them, and roll back.
+begin;
+create table public.probe31 (id int primary key);
+create sequence public.probe31_seq;
+create function public.probe31_fn() returns int language sql as 'select 1';
+do $$
+begin
+  if has_table_privilege('anon', 'public.probe31', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+     or has_table_privilege('authenticated', 'public.probe31', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'FAIL: a new table defaults to privileges for anon or authenticated';
+  end if;
+  if has_sequence_privilege('anon', 'public.probe31_seq', 'USAGE,SELECT,UPDATE')
+     or has_sequence_privilege('authenticated', 'public.probe31_seq', 'USAGE,SELECT,UPDATE') then
+    raise exception 'FAIL: a new sequence defaults to privileges for anon or authenticated';
+  end if;
+  if has_function_privilege('anon', 'public.probe31_fn()', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.probe31_fn()', 'EXECUTE') then
+    raise exception 'FAIL: a new function defaults to EXECUTE for anon/authenticated/PUBLIC';
+  end if;
+  -- The recorded service_role decision: its platform defaults are kept. This
+  -- also proves the bootstrap's platform emulation is active, without which
+  -- every assertion above would be vacuous.
+  if not has_table_privilege('service_role', 'public.probe31', 'SELECT')
+     or not has_function_privilege('service_role', 'public.probe31_fn()', 'EXECUTE') then
+    raise exception 'FAIL: service_role default privileges changed (or the bootstrap no longer emulates the platform) - 0005 records keeping them';
+  end if;
+  raise notice 'PASS: new tables, sequences and functions grant nothing to anon or authenticated; service_role defaults kept as recorded';
+end $$;
+rollback;
+
+-- ---------- #31: service_role's table privileges are stated, not ambient ----------
+do $$
+declare r record;
+begin
+  for r in
+    select c.oid::regclass as obj
+    from pg_class c
+    where c.relnamespace = 'public'::regnamespace and c.relkind in ('r','v')
+      and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass
+                      and d.objid = c.oid and d.deptype = 'e')
+      and c.relname <> 'session_record'   -- narrowed by 0006, asserted below
+  loop
+    if not has_table_privilege('service_role', r.obj, 'SELECT') then
+      raise exception 'FAIL: service_role lost SELECT on % (0005 records keeping it)', r.obj;
+    end if;
+  end loop;
+  raise notice 'PASS: service_role keeps SELECT on every public relation except session_record';
+end $$;
+
+-- =============================================================
+-- END #31 / #34
+-- =============================================================
