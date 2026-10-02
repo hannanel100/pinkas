@@ -89,9 +89,12 @@ day — irrelevant against 2^256, and the cost bound is the point.
 
 `scripts/probe-portal-rate-limit.sh` sends the legitimate envelope (must see
 zero 429s), then bursts past the limit (must see a 429), then compares limited
-responses across tokens (must be identical, and must not echo the token). It
-uses random tokens unless a staging token is supplied. Tested against a local
-mock limiter only; it has not yet run against Vercel.
+responses across tokens (must be identical, and must not echo the token), then
+tries alternative spellings of the path (`//p/`, `/%70/`, `/P/`) while limited
+— each must be refused, 404, or redirect into `/p/`, never served. It uses
+random tokens only (checklist step 2 explains why there is no valid-token
+run). Tested against local mock servers only; it has not yet run against
+Vercel.
 
 ## 2. Portal tokens in the host's logs
 
@@ -102,7 +105,12 @@ paths:
 
 * Vercel **runtime logs** (request path per function invocation, plus anything
   the code itself logs — which must never include the token; #7).
-* Vercel **Firewall / Observability** traffic views.
+* Vercel **Firewall** traffic and logs — including requests the firewall
+  **refused with 429**. Those never reach a function, so they are absent from
+  runtime logs but present here: a bride who trips the limit has her token
+  recorded in the firewall's view, not the function's.
+* Vercel **Observability** views (request paths or route-level aggregates,
+  depending on the view and plan).
 * Any **log drain**, analytics, Speed Insights or observability integration —
   none exist on this project today.
 * Vercel's own internal retention for abuse and billing, which is outside our
@@ -122,23 +130,40 @@ Why acceptance is defensible here, rather than merely convenient:
    function: it already sees every portal request and response in plaintext,
    including the page the token unlocks. A token in its log grants the vendor
    no access it did not already have.
-2. **Log readers gain nothing new — today.** The project's only member is its
-   owner, who can deploy code, and deployed code can read the service-role key
-   at runtime. Log access is therefore not a wider circle than credential
-   access; it is the same circle. This argument holds only while every member
-   can deploy: a read-only (Viewer-style) member could read live tokens in the
-   logs without being able to reach the key, and adding one reopens this
-   decision.
-3. **Retention is short and finite.** Runtime logs are kept for a bounded
-   period by plan — at the time of writing, about **1 hour on Hobby and 1 day
-   on Pro**, and up to 30 days only with Observability Plus. A logged token is
-   live for at most that long *in the log*; the token itself expires at
-   `wedding_date + 14 days` and can be revoked at any time (SDD §6.2).
+2. **Log readers gain nothing new — today, and only if checked.** The argument
+   is that everyone who can read the logs can already reach the service-role
+   key (by deploying production code that reads it), so log access is not a
+   wider circle than credential access. That holds only if **every** log
+   reader below can deploy to production. The readers are:
+   * **project / team members, every role.** A Viewer-style member, or a
+     Developer-role member who can read production logs but cannot deploy to
+     production or read production variables, breaks the argument;
+   * **Vercel access tokens** — personal tokens of any member (including the
+     one `vercel login` creates for the CLI), and any `VERCEL_TOKEN` stored as
+     a GitHub Actions secret or anywhere else. A token reads logs over the API
+     with its owner's rights, from wherever it is stored;
+   * **integrations** granted log, trace or observability scopes.
 
-**Retention window accepted:** the runtime-log retention of the plan in use, as
-observed in the dashboard during the checklist below — expected **≤ 1 day**.
-The observed value is recorded on #40. Any change that lengthens it is a
-change to this decision.
+   Today the project has one member, its owner, and is meant to have no
+   tokens beyond the owner's CLI login and no integrations. Checklist step 4
+   verifies this rather than assuming it; any other reader reopens this
+   decision.
+3. **Retention bounds how long a token can be *found*, not how long it
+   *works*.** Each surface keeps logs for a bounded, plan-dependent period —
+   at the time of writing, runtime logs about **1 hour on Hobby and 1 day on
+   Pro**, up to 30 days with Observability Plus; firewall and observability
+   retention must be read off the dashboard (checklist step 3). But a token
+   copied out of a log in that window **stays valid until `wedding_date + 14
+   days`** — typically **months** — unless the instructor regenerates it
+   (SDD §6.2). Retention limits the window of discovery; it does not limit the
+   exposure once discovered.
+
+**Retention windows accepted:** for **each** surface that records `/p/<token>`
+— runtime logs, firewall logs (including 429-refused requests), observability
+views — the retention of the plan in use, as observed in the dashboard in
+checklist step 3 and recorded per surface on #40. Expected ≤ 1 day for runtime
+logs; the others are unknown until observed. Any change that lengthens any of
+them is a change to this decision.
 
 What would make the exposure real is the token **leaving** the host's logs. So
 the conditions are the decision:
@@ -150,8 +175,10 @@ the conditions are the decision:
   paths or extend retention.
 * **Never copy a `/p/` log line** into an issue, PR, chat or support ticket.
   When sharing a log, redact the path to `/p/<redacted>`.
-* **Team membership on the Vercel project is the log ACL.** Today it is one
-  person. Adding a member widens who can read live tokens — note it on #40.
+* **Members, access tokens and integrations together are the log ACL.** Today
+  that is one person and their CLI login. Adding a member of any role, minting
+  a token (including a `VERCEL_TOKEN` for CI), or granting an integration log
+  access widens who can read live tokens — it reopens this decision on #40.
 * Application code never logs the token, its prefix, or an error message
   containing either (#7's acceptance criteria).
 
@@ -160,20 +187,30 @@ the conditions are the decision:
 * **Scrub or truncate paths in the host's logs.** Vercel offers no path
   redaction for its own runtime logs; this is only possible for data we export
   (log drains), and the decision above forbids exporting it at all.
-* **Move the token out of the path** — for example into the URL fragment
-  (`/p#<token>`), which browsers never send to any server and so never reaches
-  any log. This is the only option that removes the exposure entirely. It is
-  also a product-visible change to how the link works and needs client-side
-  code to read the fragment and post it, which cuts against the portal's
-  minimal server-rendered design (SDD §12.4). **Not this ticket's call.** If
-  `security` rejects the bounded acceptance, route it as a `backend` ticket
-  with `**Challenge:** yes`, touching ADR-0005.
+* **Move the token out of the path** into the URL fragment (`/p#<token>`),
+  which browsers never send to any server. Client code reads the fragment and
+  exchanges it by **POST** — request bodies are not logged — for a session.
+  This is the only option that removes the exposure entirely. A half-measure
+  does not: a `GET /p/<token>` that sets a cookie and redirects to a clean URL
+  still logs the token once, on that first request, which is all a log reader
+  needs.
+
+  It is also a product-visible change to how the link works, needs
+  client-side code on a deliberately minimal server-rendered page (SDD
+  §12.4), and touches ADR-0005. **Not this ticket's call — but not an "if
+  `security` objects later" question either.** Once #7 issues the first real
+  link, changing the link format means reissuing every link already sent over
+  WhatsApp. **The path-vs-fragment decision must be made before #7 issues a
+  real link.** It is being routed separately; the "accept, bounded" decision
+  above is provisional until it lands, and is moot for links issued under a
+  fragment scheme if that is the outcome.
 * **Query string instead of path.** No better: hosts log query strings too.
 
 ### Revisit when
 
 * a log drain or observability vendor is proposed;
-* the Vercel project gains a second member;
+* the Vercel project gains a member of any role, a Vercel access token is
+  created beyond the owner's CLI login, or an integration gets log access;
 * the plan changes (retention changes with it);
 * the portal moves off Vercel;
 * a portal link is believed leaked — regenerate that bride's token first, then
@@ -198,19 +235,44 @@ Requires the Vercel project from [vercel.md](./vercel.md) (#28) to exist.
    ./scripts/probe-portal-rate-limit.sh https://<production-domain>
    ```
 
-   Paste the output on #40. If you probe a protected preview instead, export
-   `VERCEL_AUTOMATION_BYPASS_SECRET` in your shell for that run only (only if
-   one exists; see vercel.md) and unset it after.
-3. **Re-verify with a resolving token once #7 ships** — against staging data
-   only. In your shell, for one run, export `PORTAL_PROBE_VALID_TOKEN` with a
-   **staging** bride's live token, re-run step 2 against a preview, then
-   `unset PORTAL_PROBE_VALID_TOKEN`. Never a production bride's token.
-4. **Observe what the logs record.** Open `https://<production-domain>/p/probe-not-a-token`
-   in a browser, then Project, Logs: confirm what is shown for that request
-   (full path? query?). Note the retention period the Logs view states for
-   your plan. Record both on #40 — this replaces the "at the time of writing"
+   Paste the output on #40. If you probe a protected preview instead, and a
+   bypass secret exists (see vercel.md), enter it without echoing it or
+   leaving it in shell history, for that run only:
+
+   ```bash
+   read -rs VERCEL_AUTOMATION_BYPASS_SECRET; export VERCEL_AUTOMATION_BYPASS_SECRET
+   ./scripts/probe-portal-rate-limit.sh https://<preview-deployment-url>
+   unset VERCEL_AUTOMATION_BYPASS_SECRET
+   ```
+
+   There is deliberately **no step that probes with a resolving token.** The
+   firewall decides on the IP alone, before the request reaches the app, so a
+   valid token cannot change the edge's response — the probe's random tokens
+   already exercise everything the edge does. And no environment both sits
+   behind the firewall and resolves a token we may use: previews hold no
+   service-role key (vercel.md), a staging token is invalid on production, and
+   a real production bride's token must never be used for testing.
+   Validity-hiding when the **application-layer** limit (#37) trips belongs in
+   #7/#25's integration tests, where a resolving fixture token exists. The
+   probe keeps an optional `PORTAL_PROBE_VALID_TOKEN` input — checked, like
+   the random ones, for not being echoed in the limited response — for the day
+   such an environment exists; if used, enter it with `read -rs` as above.
+3. **Observe what each surface records, and for how long.** Open
+   `https://<production-domain>/p/probe-not-a-token` in a browser; step 2 has
+   already tripped the limit once. For **each** of Logs (runtime), Firewall
+   (traffic / logs, including the 429-refused requests) and Observability,
+   record on #40 whether `/p/<token>` appears in full, and the retention the
+   view states for your plan. This replaces the "at the time of writing"
    numbers above with observed ones.
-5. **Confirm the conditions hold:** Settings, Log Drains — none; Analytics and
-   Speed Insights — disabled; Integrations — none that ingest logs or traces;
-   Members — who is listed. Record on #40.
-6. **`security` reviews** this runbook and the evidence from steps 2–5.
+4. **Confirm the conditions hold**, recording each on #40:
+   * Settings, Log Drains — none.
+   * Analytics, Speed Insights, Observability Plus — disabled.
+   * Integrations — none with log, trace or observability access.
+   * Team / project members — list them **with their roles**; every one must
+     be able to deploy to production (decision point 2).
+   * Access tokens — Account Settings, Tokens, for **every** member: token
+     names and scopes; only the owner's CLI login is expected.
+   * GitHub — `gh secret list --repo hannanel100/pinkas` (prints names only):
+     no `VERCEL_TOKEN` or other Vercel credential, unless #25 has added one
+     with `security`'s review — in which case it is a log reader too.
+5. **`security` reviews** this runbook and the evidence from steps 2–4.
