@@ -52,9 +52,20 @@
 -- ACCESS LOG FAN-OUT
 --
 -- One access_log row per DISTINCT bride whose data appears anywhere in the
--- document — the risk list, today's sessions, or an open balance counted into
--- the payment total — all sharing p_request_id. A bride in two sections is one
--- row. A tenant with nothing to show writes no row: the log records what was
+-- document — the risk list, today's sessions, an open balance counted into
+-- the payment total, or a foreign-currency payment counted into
+-- other_currency_payment_count — all sharing p_request_id. A bride whose rows
+-- contribute to any number in the document is logged, even when that number
+-- is only a count. A bride in two sections is one row.
+--
+-- p_REQUEST_ID MUST BE A UUID. access_log.request_id is text and the log must
+-- hold identifiers only, never content (SDD §3.11); a free-text parameter
+-- written verbatim into it would be a side channel for exactly the content
+-- the log must not carry (security review of #35: "<name> is pregnant, see
+-- notes" was storable). The parameter stays `text` — so the signature other
+-- migrations grant and revoke on is unchanged and a bad value fails with a
+-- clear 22023 rather than a cast error — but it must match the canonical
+-- 8-4-4-4-12 hex form, and is stored lower-cased. A tenant with nothing to show writes no row: the log records what was
 -- disclosed, and nothing was. actor_kind is the literal 'instructor': a support
 -- session impersonating the tenant (an `impersonated_by` JWT claim, #7 A′) is
 -- refused outright rather than logged as the instructor, which is exactly the
@@ -141,9 +152,11 @@ begin
   end if;
 
   -- request_id is what ties this read's fan-out together in the log; a read
-  -- that cannot be correlated is not one the log can explain later.
-  if coalesce(btrim(p_request_id), '') = '' or length(p_request_id) > 128 then
-    raise exception 'today_screen: p_request_id must be a non-empty string of at most 128 characters'
+  -- that cannot be correlated is not one the log can explain later. It must be
+  -- a uuid and nothing else: the log holds identifiers, never content.
+  if p_request_id is null
+     or p_request_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    raise exception 'today_screen: p_request_id must be a uuid (8-4-4-4-12 hex)'
       using errcode = '22023';
   end if;
 
@@ -203,10 +216,13 @@ begin
     select bride_id from todays
     union
     select bride_id from open_owed
+    union
+    -- feeds other_currency_payment_count, even when the course is fully paid
+    select bride_id from owed where other_currency > 0
   ),
   logged as (
     insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource, request_id)
-    select v_uid, 'instructor', v_uid, s.bride_id, 'read', 'today_screen', p_request_id
+    select v_uid, 'instructor', v_uid, s.bride_id, 'read', 'today_screen', lower(p_request_id)
     from subjects s
   )
   select jsonb_build_object(
@@ -266,7 +282,8 @@ comment on function public.today_screen(date, text) is
   'AGGREGATE per active course (lib/domain/risk.ts computes the verdict), '
   'today''s sessions and the open-payment total, all as of p_today '
   '(Asia/Jerusalem civil date). Writes one access_log row per bride in the '
-  'document, in the same statement. security invoker - RLS applies. The '
+  'document, in the same statement; p_request_id must be a uuid (the log holds '
+  'identifiers, never content). security invoker - RLS applies. The '
   'returned shape is documented in migration 0004.';
 
 -- Signed-in instructors only. Revoked by name from anon and service_role as

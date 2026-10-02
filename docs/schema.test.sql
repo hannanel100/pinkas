@@ -817,8 +817,20 @@ insert into payment (tenant_id, course_id, amount, currency, method, paid_at) va
   ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f2', 1000, 'ILS', 'cash',     date '2030-04-01'),  -- F2 fully paid
   ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f3',  600, 'ILS', 'cash',     date '2030-01-10'),
   ('35000000-0000-4000-8000-0000000000a0', '35200000-0000-4000-8000-0000000000a1',  250, 'ILS', 'cash',     date '2030-05-01');
+-- F8: a completed course fully paid in ILS, plus one USD payment. She owes
+-- nothing and is in no list, but her USD payment is counted into
+-- other_currency_payment_count, so her data IS in the document and she must
+-- be logged (security review of #35).
+insert into bride (id, tenant_id, first_name, status) values
+  ('35100000-0000-4000-8000-0000000000f8', '35000000-0000-4000-8000-0000000000f0', 'Paid', 'completed');
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, agreed_price, status) values
+  ('35200000-0000-4000-8000-0000000000f8', '35000000-0000-4000-8000-0000000000f0', '35100000-0000-4000-8000-0000000000f8', '{}', date '2030-01-01', 800, 'completed');
+insert into payment (tenant_id, course_id, amount, currency, method, paid_at) values
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f8', 800, 'ILS', 'cash',     date '2029-12-01'),
+  ('35000000-0000-4000-8000-0000000000f0', '35200000-0000-4000-8000-0000000000f8',  50, 'USD', 'transfer', date '2029-12-01');
 -- Expected for F on 2030-05-10: F1 owes 3000-1000 = 2000, F3 owes 2000-600 = 1400
--- -> outstanding_total 3400.00 over 2 courses / 2 brides, 1 foreign-currency payment.
+-- -> outstanding_total 3400.00 over 2 courses / 2 brides; 2 foreign-currency
+-- payments (F1's and F8's).
 
 -- ---------- shape: invoker-rights function, pinned search_path, narrow grants ----------
 do $$
@@ -862,7 +874,7 @@ create temp table today35 (label text primary key, doc jsonb);
 do $$
 declare doc jsonb; got text; c jsonb; s jsonb;
 begin
-  doc := today_screen(date '2030-05-10', 'req-35-f-0510');
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-000000000510');
   insert into today35 values ('f0510', doc);
 
   -- top-level and per-element key sets are the contract (lib/data/today.ts)
@@ -942,8 +954,8 @@ begin
   got := concat_ws('/', doc #>> '{payments,currency}', doc #>> '{payments,outstanding_total}',
                    doc #>> '{payments,open_course_count}', doc #>> '{payments,open_bride_count}',
                    doc #>> '{payments,other_currency_payment_count}');
-  if got <> 'ILS/3400.00/2/2/1' then
-    raise exception 'FAIL: payments summary is %, expected ILS/3400.00/2/2/1', got;
+  if got <> 'ILS/3400.00/2/2/2' then
+    raise exception 'FAIL: payments summary is %, expected ILS/3400.00/2/2/2', got;
   end if;
 
   raise notice 'PASS: today_screen returns risk aggregate, Israeli-day sessions and payment total in one documented jsonb shape';
@@ -971,14 +983,17 @@ do $$
 declare n int; got text;
 begin
   select count(*), string_agg(bride_id::text, ',' order by bride_id) into n, got
-  from access_log where request_id = 'req-35-f-0510';
-  -- F1 (courses, sessions, payments), F2 (courses, sessions), F3 (payments), F4 (courses)
+  from access_log where request_id = '35500000-0000-4000-8000-000000000510';
+  -- F1 (courses, sessions, payments), F2 (courses, sessions), F3 (payments),
+  -- F4 (courses), F8 (other_currency_payment_count only). Not F5 (nothing
+  -- about her is in the document), not F6 (soft-deleted).
   if got is distinct from '35100000-0000-4000-8000-0000000000f1,35100000-0000-4000-8000-0000000000f2,'
-                          '35100000-0000-4000-8000-0000000000f3,35100000-0000-4000-8000-0000000000f4' then
-    raise exception 'FAIL: access_log fan-out is [%] (% rows), expected F1..F4 once each', got, n;
+                          '35100000-0000-4000-8000-0000000000f3,35100000-0000-4000-8000-0000000000f4,'
+                          '35100000-0000-4000-8000-0000000000f8' then
+    raise exception 'FAIL: access_log fan-out is [%] (% rows), expected F1..F4 and F8 once each', got, n;
   end if;
   select count(*) into n from access_log
-  where request_id = 'req-35-f-0510'
+  where request_id = '35500000-0000-4000-8000-000000000510'
     and not (tenant_id = auth.uid() and actor_kind = 'instructor' and actor_id = auth.uid()
              and action = 'read' and resource = 'today_screen');
   if n <> 0 then raise exception 'FAIL: % access_log rows are mis-attributed', n; end if;
@@ -989,7 +1004,7 @@ end $$;
 do $$
 declare doc jsonb; got text;
 begin
-  doc := today_screen(date '2030-05-09', 'req-35-f-0509');
+  doc := today_screen(date '2030-05-09', '35500000-0000-4000-8000-000000000509');
   -- F1's cancellation (Israeli 05-02) is exactly 7 days old on 05-09: not stale
   select e ->> 'stale_cancellations' into got from jsonb_array_elements(doc -> 'courses') e
   where e ->> 'course_id' = '35200000-0000-4000-8000-0000000000f1';
@@ -1002,7 +1017,7 @@ begin
   end if;
 
   -- the post-dated cheque counts once its date has passed: F1 then owes 1500
-  doc := today_screen(date '2030-05-20', 'req-35-f-0520');
+  doc := today_screen(date '2030-05-20', '35500000-0000-4000-8000-000000000520');
   if doc #>> '{payments,outstanding_total}' <> '2900.00' then
     raise exception 'FAIL: outstanding on 2030-05-20 is %, expected 2900.00', doc #>> '{payments,outstanding_total}';
   end if;
@@ -1014,7 +1029,7 @@ do $$
 declare n int;
 begin
   begin
-    perform today_screen(null, 'req-35-null');
+    perform today_screen(null, '35500000-0000-4000-8000-0000000000e1');
     raise exception 'FAIL: today_screen accepted a null p_today';
   exception when sqlstate '22023' then null;
   end;
@@ -1024,18 +1039,42 @@ begin
   exception when sqlstate '22023' then null;
   end;
 
+  -- request_id is written into access_log verbatim: it must be an identifier,
+  -- never a carrier for content (security review of #35)
+  begin
+    perform today_screen(date '2030-05-10', 'Gviria Other is pregnant, see notes');
+    raise exception 'FAIL: today_screen accepted free text as a request id';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform today_screen(date '2030-05-10', 'req-35-f-0510');
+    raise exception 'FAIL: today_screen accepted a non-uuid request id';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    -- a uuid with content smuggled after it
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-000000000510 pregnant');
+    raise exception 'FAIL: today_screen accepted a uuid with trailing text';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform today_screen(date '2030-05-10', E'35500000-0000-4000-8000-000000000510\npregnant');
+    raise exception 'FAIL: today_screen accepted a uuid followed by a newline and text';
+  exception when sqlstate '22023' then null;
+  end;
+
   -- an impersonated support session must not be logged as the instructor
   perform set_config('request.jwt.claims',
     '{"sub":"35000000-0000-4000-8000-0000000000f0","impersonated_by":"5e000000-0000-4000-8000-000000000001"}', true);
   begin
-    perform today_screen(date '2030-05-10', 'req-35-impersonated');
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-0000000000e2');
     raise exception 'FAIL: today_screen ran under an impersonated session';
   exception when sqlstate '42501' then null;
   end;
 
   perform set_config('request.jwt.claims', '{}', true);
   begin
-    perform today_screen(date '2030-05-10', 'req-35-anon');
+    perform today_screen(date '2030-05-10', '35500000-0000-4000-8000-0000000000e3');
     raise exception 'FAIL: today_screen ran without an authenticated caller';
   exception when sqlstate '28000' then null;
   end;
@@ -1046,7 +1085,7 @@ set request.jwt.claims = '{"sub":"35000000-0000-4000-8000-0000000000a0"}';
 do $$
 declare doc jsonb; n int;
 begin
-  doc := today_screen(date '2030-05-10', 'req-35-g-0510');
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-00000000A510');
   if doc::text like '%35000000-0000-4000-8000-0000000000f0%' or doc::text like '%Avigail%' then
     raise exception 'FAIL: tenant G''s today_screen contains tenant F data';
   end if;
@@ -1054,9 +1093,14 @@ begin
      or doc #>> '{payments,outstanding_total}' <> '3750.00' then
     raise exception 'FAIL: tenant G document is wrong: %', doc;
   end if;
-  select count(*) into n from access_log where request_id like 'req-35-%';
+  select count(*) into n from access_log where request_id like '35500000-%';
   if n <> 1 then
     raise exception 'FAIL: tenant G sees % of the #35 access_log rows, expected only its own 1', n;
+  end if;
+  -- an upper-case uuid is accepted and stored in canonical lower case
+  select count(*) into n from access_log where request_id = '35500000-0000-4000-8000-00000000a510';
+  if n <> 1 then
+    raise exception 'FAIL: request id was not stored lower-cased';
   end if;
 end $$;
 
@@ -1064,13 +1108,13 @@ set request.jwt.claims = '{"sub":"35000000-0000-4000-8000-0000000000b0"}';
 do $$
 declare doc jsonb; n int;
 begin
-  doc := today_screen(date '2030-05-10', 'req-35-h-0510');
+  doc := today_screen(date '2030-05-10', '35500000-0000-4000-8000-00000000b510');
   if doc -> 'courses' <> '[]'::jsonb or doc -> 'sessions_today' <> '[]'::jsonb
      or doc #>> '{payments,outstanding_total}' <> '0.00'
      or (doc #>> '{payments,open_course_count}')::int <> 0 then
     raise exception 'FAIL: empty tenant document is %, expected empty arrays and 0.00', doc;
   end if;
-  select count(*) into n from access_log where request_id = 'req-35-h-0510';
+  select count(*) into n from access_log where request_id = '35500000-0000-4000-8000-00000000b510';
   if n <> 0 then raise exception 'FAIL: an empty Today wrote % access_log rows; nothing was disclosed', n; end if;
   raise notice 'PASS: tenant G sees only its own Today; an empty Today is well-formed and logs nothing';
 end $$;
@@ -1082,10 +1126,14 @@ do $$
 declare n int;
 begin
   select count(*) into n from access_log
-  where request_id in ('req-35-null', '  ', 'req-35-impersonated', 'req-35-anon');
+  where request_id in ('35500000-0000-4000-8000-0000000000e1', '  ', '35500000-0000-4000-8000-0000000000e2', '35500000-0000-4000-8000-0000000000e3',
+                       'Gviria Other is pregnant, see notes', 'req-35-f-0510')
+     or request_id like '%pregnant%'
+     or (resource = 'today_screen'
+         and request_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
   if n <> 0 then raise exception 'FAIL: a refused today_screen call wrote % access_log rows', n; end if;
   select count(*) into n from access_log
-  where request_id like 'req-35-%' and bride_id = '35100000-0000-4000-8000-0000000000a1'
+  where request_id like '35500000-%' and bride_id = '35100000-0000-4000-8000-0000000000a1'
     and tenant_id <> '35000000-0000-4000-8000-0000000000a0';
   if n <> 0 then raise exception 'FAIL: tenant G''s bride was logged under another tenant'; end if;
   raise notice 'PASS: refused calls write nothing; every fan-out row belongs to its caller''s tenant';
