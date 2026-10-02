@@ -1801,3 +1801,404 @@ reset role;
 -- =============================================================
 -- END #31 / #34
 -- =============================================================
+
+-- =============================================================
+-- BEGIN #37 — portal path objects: portal_bride_view, portal_rate_limit
+-- Requires migration 0007_portal_bride_view_and_rate_limit.sql.
+-- =============================================================
+-- Seeded as superuser. Tokens are fake; only their sha256 is stored, exactly
+-- as issuance will do it (ADR-0005). Every bride carries the fields the view
+-- must NOT expose, so a widened view would have something to leak.
+insert into bride (id, tenant_id, first_name, last_name, phone, groom_name, referral_source,
+                   wedding_date, status, portal_token_hash, portal_token_issued_at, portal_expires_at) values
+  -- A, live link
+  ('a1000000-0000-4000-8000-000000000371', 'a0000000-0000-4000-8000-000000000001',
+   'Live', 'Levi', '+972500000371', 'Groom A', 'friend', current_date + 40, 'active',
+   sha256('tok-37-live'), now() - interval '1 day', now() + interval '54 days'),
+  -- A, expired link
+  ('a1000000-0000-4000-8000-000000000372', 'a0000000-0000-4000-8000-000000000001',
+   'Expired', 'Levi', '+972500000372', 'Groom B', 'friend', current_date - 30, 'completed',
+   sha256('tok-37-expired'), now() - interval '90 days', now() - interval '1 second'),
+  -- A, soft-deleted bride whose link would otherwise be live
+  ('a1000000-0000-4000-8000-000000000373', 'a0000000-0000-4000-8000-000000000001',
+   'Deleted', 'Levi', '+972500000373', 'Groom C', 'friend', current_date + 40, 'cancelled',
+   sha256('tok-37-deleted'), now() - interval '1 day', now() + interval '54 days'),
+  -- A, link with no expiry set (fails closed)
+  ('a1000000-0000-4000-8000-000000000374', 'a0000000-0000-4000-8000-000000000001',
+   'NoExpiry', 'Levi', '+972500000374', 'Groom D', 'friend', null, 'active',
+   sha256('tok-37-noexpiry'), now() - interval '1 day', null),
+  -- B, live link — a different tenant
+  ('b1000000-0000-4000-8000-000000000371', 'b0000000-0000-4000-8000-000000000002',
+   'OtherLive', 'Cohen', '+972500000375', 'Groom E', 'ad', current_date + 40, 'active',
+   sha256('tok-37-b-live'), now() - interval '1 day', now() + interval '54 days');
+update bride set deleted_at = now() where id = 'a1000000-0000-4000-8000-000000000373';
+-- the earlier fixtures (Noa, Rivka, the risk tiers) carry no token at all
+
+-- ---------- shape: the column list is the contract ----------
+do $$
+declare cols text; n int; opts text[];
+begin
+  select string_agg(column_name, ',' order by ordinal_position) into cols
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'portal_bride_view';
+  if cols is distinct from 'id,tenant_id,portal_expires_at,portal_token_hash,first_name' then
+    raise exception 'FAIL: portal_bride_view surface changed -> %', cols;
+  end if;
+
+  select c.reloptions into opts from pg_class c
+  where c.oid = 'public.portal_bride_view'::regclass;
+  if not coalesce('security_invoker=on' = any(opts) or 'security_invoker=true' = any(opts), false) then
+    raise exception 'FAIL: portal_bride_view does not declare security_invoker = on (%)', opts;
+  end if;
+
+  -- structurally separate, not filtered: the view reads `bride` and nothing else
+  select string_agg(distinct table_name, ',') into cols
+  from information_schema.view_table_usage
+  where view_schema = 'public' and view_name = 'portal_bride_view';
+  if cols is distinct from 'bride' then
+    raise exception 'FAIL: portal_bride_view reads from % (expected bride only)', cols;
+  end if;
+
+  -- no private field name on either new object
+  select count(*) into n
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name in ('portal_bride_view', 'portal_rate_limit')
+    and column_name in ('private_note','needs_review_note','covered_topic_ids');
+  if n <> 0 then raise exception 'FAIL: a private field is reachable from a #37 object'; end if;
+
+  -- and the global rule still holds with the new objects in place
+  select count(distinct table_name) into n
+  from information_schema.columns
+  where table_schema = 'public'
+    and column_name in ('private_note','needs_review_note','covered_topic_ids');
+  if n <> 1 then
+    raise exception 'FAIL: private fields are exposed by % relations, expected 1', n;
+  end if;
+
+  -- the rate-limit key is a prefix of the HASH; no column may hold token material
+  select string_agg(column_name, ',' order by column_name) into cols
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'portal_rate_limit'
+    and column_name like '%token%';
+  if cols is distinct from 'token_hash_prefix' then
+    raise exception 'FAIL: portal_rate_limit token columns are % (expected token_hash_prefix only)', cols;
+  end if;
+
+  -- not a per-bride IP access log: the whole column list is pinned, so a raw
+  -- IP, a timestamp beyond the window, or a surrogate id cannot creep back in
+  -- — each of those would let the IP row and the prefix row of one request
+  -- be joined (security review of #37).
+  select string_agg(column_name || ':' || data_type, ',' order by ordinal_position) into cols
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'portal_rate_limit';
+  if cols is distinct from
+     'client_ip_hmac:bytea,token_hash_prefix:bytea,window_start:timestamp with time zone,window_seconds:integer,hits:integer' then
+    raise exception 'FAIL: portal_rate_limit columns changed -> %', cols;
+  end if;
+  if exists (select 1 from pg_depend d join pg_class s on s.oid = d.objid
+             where s.relkind = 'S' and d.refobjid = 'public.portal_rate_limit'::regclass) then
+    raise exception 'FAIL: portal_rate_limit owns a sequence (a surrogate id is a join key)';
+  end if;
+
+  if not (select relrowsecurity from pg_class where oid = 'public.portal_rate_limit'::regclass) then
+    raise exception 'FAIL: portal_rate_limit does not have RLS enabled';
+  end if;
+
+  raise notice 'PASS: portal_bride_view exposes exactly 5 columns, reads only bride; no private field reachable from #37 objects';
+end $$;
+
+-- ---------- grants: explicit, minimal, nothing for the browser roles ----------
+do $$
+declare r text;
+begin
+  if not has_table_privilege('service_role', 'public.portal_bride_view', 'select') then
+    raise exception 'FAIL: service_role cannot select portal_bride_view';
+  end if;
+  if not has_function_privilege('service_role', 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
+    raise exception 'FAIL: service_role cannot execute portal_rate_limit_hit';
+  end if;
+
+  foreach r in array array['anon', 'authenticated'] loop
+    if has_table_privilege(r, 'public.portal_bride_view', 'select') then
+      raise exception 'FAIL: % can select portal_bride_view', r;
+    end if;
+    if has_table_privilege(r, 'public.portal_rate_limit', 'select,insert,update,delete') then
+      raise exception 'FAIL: % has privileges on portal_rate_limit', r;
+    end if;
+    if has_function_privilege(r, 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
+      raise exception 'FAIL: % can execute portal_rate_limit_hit', r;
+    end if;
+    if has_function_privilege(r, 'public.portal_rate_limit_prune()', 'execute') then
+      raise exception 'FAIL: % can execute portal_rate_limit_prune', r;
+    end if;
+  end loop;
+
+  if exists (select 1 from pg_class c, aclexplode(c.relacl) a
+             where c.oid in ('public.portal_bride_view'::regclass, 'public.portal_rate_limit'::regclass)
+               and a.grantee = 0) then
+    raise exception 'FAIL: a #37 relation is granted to PUBLIC';
+  end if;
+  if exists (select 1 from pg_proc p, aclexplode(p.proacl) a
+             where p.oid in ('public.portal_rate_limit_hit(bytea,bytea,integer)'::regprocedure,
+                             'public.portal_rate_limit_prune()'::regprocedure)
+               and a.grantee = 0) then
+    raise exception 'FAIL: a #37 function is executable by PUBLIC';
+  end if;
+
+  raise notice 'PASS: #37 objects are granted to service_role only';
+end $$;
+
+-- ---------- browser roles are refused outright ----------
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+begin
+  begin
+    perform 1 from portal_bride_view;
+    raise exception 'FAIL: authenticated read portal_bride_view';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform 1 from portal_rate_limit;
+    raise exception 'FAIL: authenticated read portal_rate_limit';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.9'), null, 60);
+    raise exception 'FAIL: authenticated executed portal_rate_limit_hit';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+set role anon;
+do $$
+begin
+  begin
+    perform 1 from portal_bride_view;
+    raise exception 'FAIL: anon read portal_bride_view';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.9'), null, 60);
+    raise exception 'FAIL: anon executed portal_rate_limit_hit';
+  exception when insufficient_privilege then null;
+  end;
+  raise notice 'PASS: anon and authenticated are refused every #37 object';
+end $$;
+reset role;
+
+-- ---------- token resolution, as the service role ----------
+set role service_role;
+set request.jwt.claims = '{}';
+do $$
+declare r record; n int;
+begin
+  -- the one lookup lib/data/portal.ts performs: equality on the hash
+  select * into r from portal_bride_view where portal_token_hash = sha256('tok-37-live');
+  if r.id is distinct from 'a1000000-0000-4000-8000-000000000371'::uuid
+     or r.tenant_id is distinct from 'a0000000-0000-4000-8000-000000000001'::uuid
+     or r.first_name is distinct from 'Live'
+     or r.portal_expires_at is null then
+    raise exception 'FAIL: live token did not resolve to its bride (%)', r;
+  end if;
+
+  select count(*) into n from portal_bride_view where portal_token_hash = sha256('tok-37-expired');
+  if n <> 0 then raise exception 'FAIL: an expired link resolved'; end if;
+  select count(*) into n from portal_bride_view where portal_token_hash = sha256('tok-37-deleted');
+  if n <> 0 then raise exception 'FAIL: a soft-deleted bride''s link resolved'; end if;
+  select count(*) into n from portal_bride_view where portal_token_hash = sha256('tok-37-noexpiry');
+  if n <> 0 then raise exception 'FAIL: a link with no expiry resolved'; end if;
+  select count(*) into n from portal_bride_view where portal_token_hash = sha256('not-a-token');
+  if n <> 0 then raise exception 'FAIL: an unknown token resolved'; end if;
+
+  -- The honest half: this view is NOT isolation. Without the hash predicate the
+  -- service role sees every tenant's resolvable brides. This assertion pins
+  -- that, so nobody reads the view as a tenant boundary — re-read the 0007
+  -- header before changing it.
+  select count(*) into n from portal_bride_view;
+  if n <> 2 then
+    raise exception 'FAIL: unfiltered portal_bride_view returned % rows, expected 2 (A live + B live)', n;
+  end if;
+
+  -- The service role and the base tables. schema.bootstrap.sql models
+  -- Supabase's default privileges (#31), so service_role holds table-level
+  -- SELECT on `bride` here exactly as it does on live Supabase: the portal key
+  -- CAN read bride.phone, and RLS does not stop it (BYPASSRLS). 0007's column
+  -- grant narrows nothing until a migration revokes that table-level privilege
+  -- (#53). This assertion pins the current state, so the migration that lands
+  -- the revoke has to change it — and the 0007 header — in the same diff.
+  if not has_table_privilege('service_role', 'public.bride', 'SELECT') then
+    raise exception 'FAIL: service_role lost table-level SELECT on bride; update this assertion and the 0007 header together (#53)';
+  end if;
+  -- session_record's private columns are refused to service_role by 0006 and
+  -- asserted in the #31 / #34 section; nothing in 0007 touches session_record.
+
+  raise notice 'PASS: portal_bride_view resolves live tokens only; column-narrowed, explicitly not tenant-isolated';
+end $$;
+
+-- ---------- rate-limit counter, as the service role ----------
+-- Clock-independent by construction: everything below runs in one DO block,
+-- i.e. one transaction, and portal_rate_limit_hit() takes its window from
+-- now() — the transaction start — so every hit here lands in the same window
+-- for each window length, however close to a boundary the suite happens to
+-- run. sha256('ip:...') stands in for the HMAC portal.ts computes; the table
+-- only needs 32 opaque bytes.
+do $$
+declare r record; i int;
+begin
+  for i in 1..3 loop
+    select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), '\xdeadbeefdeadbeef'::bytea, 3600);
+  end loop;
+  if r.ip_hits <> 3 or r.token_hash_prefix_hits <> 3 then
+    raise exception 'FAIL: after 3 hits got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
+  end if;
+  if r.window_ends_at <= now() or r.window_ends_at > now() + interval '3600 seconds' then
+    raise exception 'FAIL: window_ends_at % is not inside the current window', r.window_ends_at;
+  end if;
+
+  -- buckets are independent
+  select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), '\xcafebabecafebabe'::bytea, 3600);
+  if r.ip_hits <> 4 or r.token_hash_prefix_hits <> 1 then
+    raise exception 'FAIL: independent buckets got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
+  end if;
+
+  -- a NULL bucket is not counted and writes nothing
+  select * into r from portal_rate_limit_hit(null, '\xcafebabecafebabe'::bytea, 3600);
+  if r.ip_hits is not null or r.token_hash_prefix_hits <> 2 then
+    raise exception 'FAIL: prefix-only hit got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
+  end if;
+
+  -- a different window length is a different counter
+  select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), null, 60);
+  if r.ip_hits <> 1 then raise exception 'FAIL: 60s window shared the 3600s counter (%)', r.ip_hits; end if;
+
+  begin
+    perform * from portal_rate_limit_hit(null, null, 60);
+    raise exception 'FAIL: a hit with no bucket key was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.7'), null, 0);
+    raise exception 'FAIL: a zero-length window was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- the prefix is exactly 8 bytes: shorter or longer would split one link's
+  -- count across buckets, and a full sha256 is the lookup key, not a bucket
+  begin
+    perform * from portal_rate_limit_hit(null, '\xdeadbeef'::bytea, 60);
+    raise exception 'FAIL: a 4-byte prefix was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    perform * from portal_rate_limit_hit(null, sha256('tok-37-live'), 60);
+    raise exception 'FAIL: a 32-byte hash was accepted as a prefix';
+  exception when check_violation then null;
+  end;
+  -- the IP key must be a 32-byte HMAC: a raw IP's text or bytes is refused
+  begin
+    perform * from portal_rate_limit_hit(convert_to('203.0.113.7', 'UTF8'), null, 60);
+    raise exception 'FAIL: a raw IP was accepted as client_ip_hmac';
+  exception when check_violation then null;
+  end;
+  -- and a row cannot key on both at once
+  begin
+    insert into portal_rate_limit (client_ip_hmac, token_hash_prefix, window_start, window_seconds)
+    values (sha256('ip:203.0.113.8'), '\xdeadbeefdeadbeef'::bytea, now(), 60);
+    raise exception 'FAIL: a row keyed on both ip and prefix was accepted';
+  exception when check_violation then null;
+  end;
+
+  raise notice 'PASS: portal_rate_limit_hit counts per IP-HMAC and per hash prefix in fixed windows';
+end $$;
+reset role;
+
+-- ---------- prune removes ended windows only ----------
+-- Clock-independent: the expected count is computed in the same transaction
+-- as the prune, against the same now(), so a window that happened to end
+-- since the block above simply counts as ended on both sides.
+insert into portal_rate_limit (client_ip_hmac, window_start, window_seconds, hits)
+values (sha256('ip:198.51.100.1'), now() - interval '2 hours', 3600, 9);
+set role service_role;
+do $$
+declare n int; want int; before int;
+begin
+  select count(*) filter (where window_start + make_interval(secs => window_seconds) <= now()),
+         count(*)
+    into want, before
+  from portal_rate_limit;
+  if want < 1 then raise exception 'FAIL: prune fixture is not an ended window'; end if;
+
+  select portal_rate_limit_prune() into n;
+  if n <> want then raise exception 'FAIL: prune deleted % rows, expected %', n, want; end if;
+
+  if exists (select 1 from portal_rate_limit where client_ip_hmac = sha256('ip:198.51.100.1')) then
+    raise exception 'FAIL: prune left the ended window behind';
+  end if;
+  select count(*) into n from portal_rate_limit;
+  if n <> before - want then
+    raise exception 'FAIL: prune removed live windows (% left, expected %)', n, before - want;
+  end if;
+  raise notice 'PASS: portal_rate_limit_prune deletes ended windows and keeps current ones';
+end $$;
+reset role;
+
+-- ---------- concurrency: no lost increments ----------
+-- Four real backends, as service_role, each committing 250 separate
+-- autocommit calls against the same two counters, interleaved so that every
+-- round has four calls in flight at once. dblink lives in a scratch schema
+-- that is dropped afterwards, so it never looks like part of the schema.
+-- Requires the dblink contrib module (shipped in the postgres:16 image CI
+-- uses) and a superuser running the suite, which the harness already is.
+--
+-- Clock-independent: these are 1000 separate transactions, so a run that
+-- straddles a UTC-midnight boundary legitimately splits each bucket across
+-- two windows. The assertion is therefore on the total over windows (no
+-- increment lost) and on at most two rows per bucket (one per window — the
+-- unique index makes a duplicate within a window impossible anyway).
+create schema test37;
+create extension dblink schema test37;
+do $$
+declare
+  conninfo text := format('dbname=%s user=%s port=%s host=%s',
+                          current_database(), current_user, current_setting('port'),
+                          split_part(current_setting('unix_socket_directories'), ',', 1));
+  q text := 'select ip_hits, token_hash_prefix_hits from public.portal_rate_limit_hit('
+         || 'sha256(''ip:192.0.2.37''), ''\x3737373737373737''::bytea, 86400)';
+  c int; i int; r record;
+begin
+  for c in 1..4 loop
+    perform test37.dblink_connect('c37_' || c, conninfo);
+    perform test37.dblink_exec('c37_' || c, 'set role service_role');
+  end loop;
+  for i in 1..250 loop
+    for c in 1..4 loop
+      perform test37.dblink_send_query('c37_' || c, q);
+    end loop;
+    for c in 1..4 loop
+      perform * from test37.dblink_get_result('c37_' || c) as t(a int, b int);
+      perform * from test37.dblink_get_result('c37_' || c) as t(a int, b int);  -- terminating empty set
+    end loop;
+  end loop;
+  for c in 1..4 loop
+    perform test37.dblink_disconnect('c37_' || c);
+  end loop;
+
+  select
+    sum(hits)  filter (where client_ip_hmac = sha256('ip:192.0.2.37'))          as ip,
+    count(*)   filter (where client_ip_hmac = sha256('ip:192.0.2.37'))          as ip_rows,
+    sum(hits)  filter (where token_hash_prefix = '\x3737373737373737'::bytea)   as pref,
+    count(*)   filter (where token_hash_prefix = '\x3737373737373737'::bytea)   as pref_rows
+  into r from portal_rate_limit where window_seconds = 86400;
+  if r.ip is distinct from 1000 or r.pref is distinct from 1000
+     or r.ip_rows not between 1 and 2 or r.pref_rows not between 1 and 2 then
+    raise exception 'FAIL: concurrent hits: ip=% (% rows) prefix=% (% rows); expected 1000 each in 1-2 windows',
+      r.ip, r.ip_rows, r.pref, r.pref_rows;
+  end if;
+  raise notice 'PASS: 4 backends x 250 concurrent hits counted exactly 1000 per bucket';
+end $$;
+drop schema test37 cascade;
+-- =============================================================
+-- END #37
+-- =============================================================
