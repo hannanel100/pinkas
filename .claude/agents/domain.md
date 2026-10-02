@@ -54,9 +54,14 @@ decision.
 
 ## Risk (§8)
 
-`risk.ts` mirrors `v_course_risk` for offline use. The two must agree tier for tier and boundary
-for boundary; the view is owned by the `database` agent, so if you change one, say so plainly and
-flag the other. Five tiers exactly as `docs/SDD.md` §8.1 specifies, first match wins. Emit the
+`risk.ts` ranks the Today screen, online and offline alike — online from the aggregate the
+`today_screen` RPC returns, offline from cached rows via `summariseCourse()` (SDD §8.1,
+ADR-0008). That makes it load-bearing for the product's home screen, not an offline convenience:
+its fixture table is a release gate. `v_course_risk` remains the source of truth for the nightly
+job, so the two must still agree tier for tier and boundary for boundary; the view is owned by the
+`database` agent, so if you change one, say so plainly and flag the other. The two known gaps —
+`high` decided in SQL via `stale_cancellations`, and day-grained boundaries escalating no earlier
+than the view — are accepted in ADR-0008; do not widen them. Five tiers exactly as `docs/SDD.md` §8.1 specifies, first match wins. Emit the
 reason code and its operands — never a rendered sentence. The sentence is Hebrew and belongs to
 the translation layer.
 
