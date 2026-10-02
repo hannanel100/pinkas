@@ -4,10 +4,14 @@
 -- boundary), §4.2 (security_invoker), §17.1; ADR-0003, ADR-0005.
 -- Invariants in play: 2, 5, and 1 with the caveat spelled out below.
 --
--- Expand-only (docs/runbooks/migrations.md): one view, one table, one
--- function, and their grants. Nothing existing is dropped, renamed, altered
+-- Expand-only (docs/runbooks/migrations.md): one view, one table, two
+-- functions, and their grants. Nothing existing is dropped, renamed, altered
 -- or repurposed, so this is safe to apply ahead of #7 (lib/data/portal.ts),
--- which is the only intended consumer of all three objects.
+-- which is the only intended consumer of these objects.
+--
+-- GO-LIVE PRECONDITION for #7: a scheduled job running
+-- portal_rate_limit_prune() must exist before the portal route serves
+-- traffic. See RETENTION in section 2.
 -- =============================================================
 
 
@@ -40,6 +44,13 @@
 --     unique (bride_portal_token_hash_key), so a correct lookup returns at
 --     most one row. A lookup that forgets the predicate returns every tenant's
 --     resolvable brides. Nothing in the database prevents that.
+--   * Five columns is not "nothing sensitive". A forgotten predicate
+--     discloses, for every tenant's resolvable bride: her first name, which
+--     instructor she is with (tenant_id), and portal_expires_at — which
+--     defaults to wedding_date + 14 (§6.2), so in practice it IS her wedding
+--     date, minus a constant. The view keeps phone, last_name, city,
+--     groom_name, referral_source and status out of reach; it does not keep
+--     the wedding date out of reach.
 --   * On a live Supabase project the service role also holds table-level
 --     privileges on `bride` by default, so the key can still `select phone
 --     from bride` directly. The column-level grant below is the complete set
@@ -114,22 +125,65 @@ grant select (id, tenant_id, first_name, portal_token_hash, portal_expires_at, d
 -- in Postgres because an in-memory counter on serverless is per instance —
 -- N instances, N independent limits, i.e. no limit.
 --
--- HASH PREFIX, NEVER TOKEN PREFIX — decided, not inherited.
+-- WHAT EACH BUCKET THROTTLES — they are not interchangeable
+--
+--   * The IP bucket is the ONLY control on token guessing. A guessed token
+--     has a random hash, so guesses scatter across hash-prefix buckets and
+--     never accumulate in one. Its worth therefore depends entirely on the IP
+--     being real: portal.ts must take the client IP from the hosting
+--     platform's trusted header (the address the platform itself observed),
+--     never the leftmost X-Forwarded-For entry, which the client writes.
+--   * The hash-prefix bucket only throttles one link being hammered — a
+--     leaked link replayed at volume. It does nothing against guessing.
+--
+-- HASH PREFIX, NEVER TOKEN PREFIX — decided, not inherited
+--
 --   §6.2 says "per token prefix". A prefix of the token is a partial
 --   credential; storing it here would put plaintext credential material in a
---   table nobody thinks of as sensitive. The bucket key is therefore a prefix
---   of sha256(token) — the same hash bride.portal_token_hash holds — which
+--   table nobody thinks of as sensitive. The bucket key is a prefix of
+--   sha256(token) — the same hash bride.portal_token_hash holds — which
 --   buckets identical tokens identically and carries no plaintext. The column
---   is named token_hash_prefix so nobody can read it as anything else, and the
---   CHECK caps it at 16 bytes so it stays a bucket key, not the lookup key.
+--   is named token_hash_prefix so nobody can read it as anything else.
+--   It is EXACTLY 8 bytes (a CHECK): a range would let two callers bucket the
+--   same link differently and split its count, and 8 bytes is far too short to
+--   serve as the lookup key itself.
 --
--- WHY IP AND HASH PREFIX ARE SEPARATE ROWS
---   Each request bumps two independent counters: one for the client IP, one
---   for the hash prefix. Exactly one of the two key columns is set per row
---   (num_nonnulls = 1), and each kind has its own partial unique index, which
---   is the ON CONFLICT arbiter for that kind.
+-- THIS TABLE MUST NOT BECOME A PER-BRIDE IP ACCESS LOG
+--
+--   A real token's hash prefix is, in practice, unique to one bride. Every
+--   hit writes an IP row and a prefix row; anything that lets a reader pair
+--   those two rows turns this table into "bride X opened her link from IP Y
+--   at time T" — location data about the women this product promises
+--   discretion to (PRD §10.1, SDD §6.3). So, deliberately:
+--
+--   * No raw IP. The IP bucket is keyed by client_ip_hmac = HMAC-SHA256(key,
+--     ip), 32 bytes, computed in lib/data/portal.ts. The key is a server-side
+--     secret (an environment variable alongside the service-role key) that
+--     never enters the database, so a dump of this table cannot be reversed
+--     to IPs — the IPv4 space is small enough that an unkeyed hash could.
+--     Bucketing needs equality only, which a keyed hash preserves. Rotating
+--     the key just resets every IP counter, which is harmless.
+--   * No surrogate id, no created_at, no updated_at. Each of those, identical
+--     or consecutive across the two rows written by one call, was a join key.
+--     A row is identified by its bucket and window (the two partial unique
+--     indexes below), and carries nothing else but the count. This is a
+--     deliberate exception to the created_at/updated_at convention.
+--   * Residual, stated honestly: rows written in one call share a
+--     transaction id (system column xmin) and tend to sit on the same page.
+--     A superuser-level reader can still pair them that way. What they can
+--     pair is a bride's link with an IP *pseudonym*, at window granularity,
+--     for as long as the rows exist — which is why pruning is mandatory.
+--
+-- RETENTION — a precondition for #7, not a nicety
+--
+--   Rows are useless once their window ends. portal_rate_limit_prune()
+--   deletes them, and a scheduled job running it (pg_cron, at least as often
+--   as the shortest window portal.ts uses; infra) MUST be in place before
+--   #7's portal route goes live. Without it this table accumulates every
+--   portal visit forever.
 --
 -- CONCURRENCY
+--
 --   portal_rate_limit_hit() increments with INSERT ... ON CONFLICT DO UPDATE
 --   SET hits = hits + 1. Under READ COMMITTED that statement either inserts or
 --   takes the row lock on the conflicting row and re-reads it before
@@ -139,29 +193,26 @@ grant select (id, tenant_id, first_name, portal_token_hash, portal_expires_at, d
 --   one could not be an ON CONFLICT arbiter.
 --
 -- NOT TENANT DATA
+--
 --   No tenant_id: a request is rate-limited before it is known to belong to
 --   any tenant, and most abusive requests belong to none. RLS is enabled with
 --   no policies so that anon/authenticated are refused even if a default grant
 --   ever leaks onto the table; only the service role (BYPASSRLS) reaches it.
---
--- RETENTION
---   client_ip is personal data. Rows are only useful for the window they
---   count; portal_rate_limit_prune() deletes expired windows and is meant to be
---   scheduled (pg_cron, infra) — see the open item on #37. The window_start
---   index serves it.
+--   No primary key: the natural key has a nullable half by design (exactly
+--   one of the two bucket columns is set), so it is enforced by two partial
+--   unique indexes instead.
 create table public.portal_rate_limit (
-  id                bigint generated always as identity primary key,
-  client_ip         inet,
-  token_hash_prefix bytea,       -- prefix of sha256(token); NEVER of the token
+  client_ip_hmac    bytea,       -- HMAC-SHA256(server-side key, client IP); never the IP
+  token_hash_prefix bytea,       -- first 8 bytes of sha256(token); NEVER of the token
   window_start      timestamptz not null,
   window_seconds    integer     not null,
   hits              integer     not null default 1,
-  created_at        timestamptz not null default now(),
-  updated_at        timestamptz not null default now(),
   constraint portal_rate_limit_one_key
-    check (num_nonnulls(client_ip, token_hash_prefix) = 1),
+    check (num_nonnulls(client_ip_hmac, token_hash_prefix) = 1),
+  constraint portal_rate_limit_ip_hmac_len
+    check (client_ip_hmac is null or octet_length(client_ip_hmac) = 32),
   constraint portal_rate_limit_prefix_len
-    check (token_hash_prefix is null or octet_length(token_hash_prefix) between 4 and 16),
+    check (token_hash_prefix is null or octet_length(token_hash_prefix) = 8),
   constraint portal_rate_limit_window
     check (window_seconds between 1 and 86400),
   constraint portal_rate_limit_hits
@@ -169,27 +220,29 @@ create table public.portal_rate_limit (
 );
 
 create unique index portal_rate_limit_ip_key
-  on public.portal_rate_limit (client_ip, window_seconds, window_start)
-  where client_ip is not null;
+  on public.portal_rate_limit (client_ip_hmac, window_seconds, window_start)
+  where client_ip_hmac is not null;
 create unique index portal_rate_limit_prefix_key
   on public.portal_rate_limit (token_hash_prefix, window_seconds, window_start)
   where token_hash_prefix is not null;
 create index portal_rate_limit_window_idx
   on public.portal_rate_limit (window_start);
 
-create trigger portal_rate_limit_touch before update on public.portal_rate_limit
-  for each row execute function set_updated_at();
-
 alter table public.portal_rate_limit enable row level security;
 -- No policies, on purpose: see NOT TENANT DATA above.
 
 comment on table public.portal_rate_limit is
   'Fixed-window portal rate-limit counters (SDD 6.2, issue #37). One row per '
-  '(client_ip | token_hash_prefix, window). token_hash_prefix is a prefix of '
-  'sha256(token), never of the token. Written only via portal_rate_limit_hit().';
+  '(client_ip_hmac | token_hash_prefix, window). No raw IP, no timestamps '
+  'beyond the window, no surrogate id - so the two rows of one request cannot '
+  'be joined into a per-bride IP log. Written only via portal_rate_limit_hit(); '
+  'must be pruned on a schedule.';
+comment on column public.portal_rate_limit.client_ip_hmac is
+  'HMAC-SHA256 of the client IP under a server-side key that never enters the '
+  'database. Equality bucketing only; not reversible from a dump.';
 comment on column public.portal_rate_limit.token_hash_prefix is
-  'Leading 4-16 bytes of sha256(portal token). A prefix of the HASH, never of '
-  'the token: a token prefix is a partial credential.';
+  'First 8 bytes of sha256(portal token). A prefix of the HASH, never of the '
+  'token: a token prefix is a partial credential.';
 
 
 -- portal_rate_limit_hit — count one request against both buckets.
@@ -201,11 +254,14 @@ comment on column public.portal_rate_limit.token_hash_prefix is
 -- count comes back NULL and nothing is written for it. Passing both NULL is an
 -- error — a call that counts nothing is a bug in the caller.
 --
+-- The window is taken from now(), i.e. the transaction start, so every hit in
+-- one transaction lands in the same window.
+--
 -- security invoker: the caller (service_role) needs insert/update/select on
 -- the table, granted below. No elevation is needed for a table that is not
 -- tenant data and that the caller already reaches.
 create function public.portal_rate_limit_hit(
-  p_client_ip         inet,
+  p_client_ip_hmac    bytea,
   p_token_hash_prefix bytea,
   p_window_seconds    integer
 )
@@ -223,7 +279,7 @@ declare
   v_ip_hits    integer;
   v_pref_hits  integer;
 begin
-  if p_client_ip is null and p_token_hash_prefix is null then
+  if p_client_ip_hmac is null and p_token_hash_prefix is null then
     raise exception 'portal_rate_limit_hit: at least one bucket key is required'
       using errcode = '22023';
   end if;
@@ -237,10 +293,10 @@ begin
   v_start := date_bin(make_interval(secs => p_window_seconds), now(),
                       timestamptz '1970-01-01 00:00:00+00');
 
-  if p_client_ip is not null then
-    insert into portal_rate_limit (client_ip, window_seconds, window_start)
-    values (p_client_ip, p_window_seconds, v_start)
-    on conflict (client_ip, window_seconds, window_start) where client_ip is not null
+  if p_client_ip_hmac is not null then
+    insert into portal_rate_limit (client_ip_hmac, window_seconds, window_start)
+    values (p_client_ip_hmac, p_window_seconds, v_start)
+    on conflict (client_ip_hmac, window_seconds, window_start) where client_ip_hmac is not null
     do update set hits = portal_rate_limit.hits + 1
     returning hits into v_ip_hits;
   end if;
@@ -258,15 +314,15 @@ begin
 end
 $fn$;
 
-comment on function public.portal_rate_limit_hit(inet, bytea, integer) is
-  'Increment the per-IP and per-token-hash-prefix fixed-window counters and '
-  'return both counts (SDD 6.2, issue #37). Atomic under concurrency via '
+comment on function public.portal_rate_limit_hit(bytea, bytea, integer) is
+  'Increment the per-IP-HMAC and per-token-hash-prefix fixed-window counters '
+  'and return both counts (SDD 6.2, issue #37). Atomic under concurrency via '
   'INSERT ... ON CONFLICT DO UPDATE. Decides nothing; limits live in '
   'lib/data/portal.ts.';
 
 
 -- portal_rate_limit_prune — delete windows that have ended.
--- Returns the number of rows deleted. Intended for a scheduled job.
+-- Returns the number of rows deleted. Must run on a schedule (see RETENTION).
 create function public.portal_rate_limit_prune()
 returns integer
 language sql
@@ -275,15 +331,15 @@ set search_path = public, pg_temp
 as $fn$
   with gone as (
     delete from portal_rate_limit
-    where window_start + make_interval(secs => window_seconds) < now()
+    where window_start + make_interval(secs => window_seconds) <= now()
     returning 1
   )
   select count(*)::integer from gone;
 $fn$;
 
 comment on function public.portal_rate_limit_prune() is
-  'Delete ended rate-limit windows (issue #37). client_ip is personal data '
-  'and has no use after its window closes.';
+  'Delete ended rate-limit windows (issue #37). Scheduling it is a '
+  'precondition for the portal route going live.';
 
 
 -- Grants. Explicit and minimal; nothing relies on default privileges.
@@ -297,9 +353,9 @@ comment on function public.portal_rate_limit_prune() is
 revoke all on public.portal_rate_limit from public, anon, authenticated, service_role;
 grant select, insert, update, delete on public.portal_rate_limit to service_role;
 
-revoke execute on function public.portal_rate_limit_hit(inet, bytea, integer)
+revoke execute on function public.portal_rate_limit_hit(bytea, bytea, integer)
   from public, anon, authenticated, service_role;
-grant  execute on function public.portal_rate_limit_hit(inet, bytea, integer) to service_role;
+grant  execute on function public.portal_rate_limit_hit(bytea, bytea, integer) to service_role;
 
 revoke execute on function public.portal_rate_limit_prune()
   from public, anon, authenticated, service_role;

@@ -1885,6 +1885,22 @@ begin
     raise exception 'FAIL: portal_rate_limit token columns are % (expected token_hash_prefix only)', cols;
   end if;
 
+  -- not a per-bride IP access log: the whole column list is pinned, so a raw
+  -- IP, a timestamp beyond the window, or a surrogate id cannot creep back in
+  -- — each of those would let the IP row and the prefix row of one request
+  -- be joined (security review of #37).
+  select string_agg(column_name || ':' || data_type, ',' order by ordinal_position) into cols
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'portal_rate_limit';
+  if cols is distinct from
+     'client_ip_hmac:bytea,token_hash_prefix:bytea,window_start:timestamp with time zone,window_seconds:integer,hits:integer' then
+    raise exception 'FAIL: portal_rate_limit columns changed -> %', cols;
+  end if;
+  if exists (select 1 from pg_depend d join pg_class s on s.oid = d.objid
+             where s.relkind = 'S' and d.refobjid = 'public.portal_rate_limit'::regclass) then
+    raise exception 'FAIL: portal_rate_limit owns a sequence (a surrogate id is a join key)';
+  end if;
+
   if not (select relrowsecurity from pg_class where oid = 'public.portal_rate_limit'::regclass) then
     raise exception 'FAIL: portal_rate_limit does not have RLS enabled';
   end if;
@@ -1899,7 +1915,7 @@ begin
   if not has_table_privilege('service_role', 'public.portal_bride_view', 'select') then
     raise exception 'FAIL: service_role cannot select portal_bride_view';
   end if;
-  if not has_function_privilege('service_role', 'public.portal_rate_limit_hit(inet,bytea,integer)', 'execute') then
+  if not has_function_privilege('service_role', 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
     raise exception 'FAIL: service_role cannot execute portal_rate_limit_hit';
   end if;
 
@@ -1910,7 +1926,7 @@ begin
     if has_table_privilege(r, 'public.portal_rate_limit', 'select,insert,update,delete') then
       raise exception 'FAIL: % has privileges on portal_rate_limit', r;
     end if;
-    if has_function_privilege(r, 'public.portal_rate_limit_hit(inet,bytea,integer)', 'execute') then
+    if has_function_privilege(r, 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
       raise exception 'FAIL: % can execute portal_rate_limit_hit', r;
     end if;
     if has_function_privilege(r, 'public.portal_rate_limit_prune()', 'execute') then
@@ -1924,7 +1940,7 @@ begin
     raise exception 'FAIL: a #37 relation is granted to PUBLIC';
   end if;
   if exists (select 1 from pg_proc p, aclexplode(p.proacl) a
-             where p.oid in ('public.portal_rate_limit_hit(inet,bytea,integer)'::regprocedure,
+             where p.oid in ('public.portal_rate_limit_hit(bytea,bytea,integer)'::regprocedure,
                              'public.portal_rate_limit_prune()'::regprocedure)
                and a.grantee = 0) then
     raise exception 'FAIL: a #37 function is executable by PUBLIC';
@@ -1949,7 +1965,7 @@ begin
   exception when insufficient_privilege then null;
   end;
   begin
-    perform * from portal_rate_limit_hit('203.0.113.9', null, 60);
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.9'), null, 60);
     raise exception 'FAIL: authenticated executed portal_rate_limit_hit';
   exception when insufficient_privilege then null;
   end;
@@ -1964,7 +1980,7 @@ begin
   exception when insufficient_privilege then null;
   end;
   begin
-    perform * from portal_rate_limit_hit('203.0.113.9', null, 60);
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.9'), null, 60);
     raise exception 'FAIL: anon executed portal_rate_limit_hit';
   exception when insufficient_privilege then null;
   end;
@@ -2005,10 +2021,18 @@ begin
     raise exception 'FAIL: unfiltered portal_bride_view returned % rows, expected 2 (A live + B live)', n;
   end if;
 
-  -- In this harness service_role holds no table-level grant on `bride` — only
-  -- the six columns 0007 grants — so the narrowing is privilege-enforced here.
-  -- On live Supabase it is not, until service_role's table-level grant on
-  -- `bride` is revoked (open decision on #37).
+  -- !!! HARNESS-ONLY. THE NEXT TWO ASSERTIONS DO NOT HOLD IN PRODUCTION. !!!
+  -- schema.bootstrap.sql creates service_role with no table privileges at all,
+  -- so here it holds only what migrations grant it. On live Supabase,
+  -- service_role holds full default privileges on every table in `public`:
+  -- the portal key CAN read bride.phone and CAN read session_record —
+  -- private_note included — and RLS does not stop it (BYPASSRLS). These
+  -- checks prove only that 0007 granted nothing beyond the six bride columns.
+  -- They become production truths only once a migration revokes
+  -- service_role's table-level privileges on `bride` and `session_record`
+  -- (open decision on #37). Until then, invariant 2 against the service-role
+  -- key rests on lib/data/portal.ts never naming session_record (invariant 5
+  -- lint), not on the database. Do not cite these as evidence otherwise.
   begin
     perform phone from bride limit 1;
     raise exception 'FAIL: service_role read bride.phone through 0007''s grants';
@@ -2016,7 +2040,7 @@ begin
   end;
   begin
     perform 1 from session_record limit 1;
-    raise exception 'FAIL: service_role read session_record';
+    raise exception 'FAIL: service_role read session_record through migration grants';
   exception when insufficient_privilege then null;
   end;
 
@@ -2024,11 +2048,17 @@ begin
 end $$;
 
 -- ---------- rate-limit counter, as the service role ----------
+-- Clock-independent by construction: everything below runs in one DO block,
+-- i.e. one transaction, and portal_rate_limit_hit() takes its window from
+-- now() — the transaction start — so every hit here lands in the same window
+-- for each window length, however close to a boundary the suite happens to
+-- run. sha256('ip:...') stands in for the HMAC portal.ts computes; the table
+-- only needs 32 opaque bytes.
 do $$
 declare r record; i int;
 begin
   for i in 1..3 loop
-    select * into r from portal_rate_limit_hit('203.0.113.7', '\xdeadbeef'::bytea, 3600);
+    select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), '\xdeadbeefdeadbeef'::bytea, 3600);
   end loop;
   if r.ip_hits <> 3 or r.token_hash_prefix_hits <> 3 then
     raise exception 'FAIL: after 3 hits got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
@@ -2038,19 +2068,19 @@ begin
   end if;
 
   -- buckets are independent
-  select * into r from portal_rate_limit_hit('203.0.113.7', '\xcafebabe'::bytea, 3600);
+  select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), '\xcafebabecafebabe'::bytea, 3600);
   if r.ip_hits <> 4 or r.token_hash_prefix_hits <> 1 then
     raise exception 'FAIL: independent buckets got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
   end if;
 
   -- a NULL bucket is not counted and writes nothing
-  select * into r from portal_rate_limit_hit(null, '\xcafebabe'::bytea, 3600);
+  select * into r from portal_rate_limit_hit(null, '\xcafebabecafebabe'::bytea, 3600);
   if r.ip_hits is not null or r.token_hash_prefix_hits <> 2 then
     raise exception 'FAIL: prefix-only hit got ip=% prefix=%', r.ip_hits, r.token_hash_prefix_hits;
   end if;
 
   -- a different window length is a different counter
-  select * into r from portal_rate_limit_hit('203.0.113.7', null, 60);
+  select * into r from portal_rate_limit_hit(sha256('ip:203.0.113.7'), null, 60);
   if r.ip_hits <> 1 then raise exception 'FAIL: 60s window shared the 3600s counter (%)', r.ip_hits; end if;
 
   begin
@@ -2059,40 +2089,67 @@ begin
   exception when sqlstate '22023' then null;
   end;
   begin
-    perform * from portal_rate_limit_hit('203.0.113.7', null, 0);
+    perform * from portal_rate_limit_hit(sha256('ip:203.0.113.7'), null, 0);
     raise exception 'FAIL: a zero-length window was accepted';
   exception when sqlstate '22023' then null;
   end;
 
-  -- a full sha256 (32 bytes) is the lookup key, not a bucket — refused
+  -- the prefix is exactly 8 bytes: shorter or longer would split one link's
+  -- count across buckets, and a full sha256 is the lookup key, not a bucket
+  begin
+    perform * from portal_rate_limit_hit(null, '\xdeadbeef'::bytea, 60);
+    raise exception 'FAIL: a 4-byte prefix was accepted';
+  exception when check_violation then null;
+  end;
   begin
     perform * from portal_rate_limit_hit(null, sha256('tok-37-live'), 60);
     raise exception 'FAIL: a 32-byte hash was accepted as a prefix';
   exception when check_violation then null;
   end;
+  -- the IP key must be a 32-byte HMAC: a raw IP's text or bytes is refused
+  begin
+    perform * from portal_rate_limit_hit(convert_to('203.0.113.7', 'UTF8'), null, 60);
+    raise exception 'FAIL: a raw IP was accepted as client_ip_hmac';
+  exception when check_violation then null;
+  end;
   -- and a row cannot key on both at once
   begin
-    insert into portal_rate_limit (client_ip, token_hash_prefix, window_start, window_seconds)
-    values ('203.0.113.8', '\xdeadbeef'::bytea, now(), 60);
+    insert into portal_rate_limit (client_ip_hmac, token_hash_prefix, window_start, window_seconds)
+    values (sha256('ip:203.0.113.8'), '\xdeadbeefdeadbeef'::bytea, now(), 60);
     raise exception 'FAIL: a row keyed on both ip and prefix was accepted';
   exception when check_violation then null;
   end;
 
-  raise notice 'PASS: portal_rate_limit_hit counts per IP and per hash prefix in fixed windows';
+  raise notice 'PASS: portal_rate_limit_hit counts per IP-HMAC and per hash prefix in fixed windows';
 end $$;
 reset role;
 
 -- ---------- prune removes ended windows only ----------
-insert into portal_rate_limit (client_ip, window_start, window_seconds, hits)
-values ('198.51.100.1', now() - interval '2 hours', 3600, 9);
+-- Clock-independent: the expected count is computed in the same transaction
+-- as the prune, against the same now(), so a window that happened to end
+-- since the block above simply counts as ended on both sides.
+insert into portal_rate_limit (client_ip_hmac, window_start, window_seconds, hits)
+values (sha256('ip:198.51.100.1'), now() - interval '2 hours', 3600, 9);
 set role service_role;
 do $$
-declare n int;
+declare n int; want int; before int;
 begin
+  select count(*) filter (where window_start + make_interval(secs => window_seconds) <= now()),
+         count(*)
+    into want, before
+  from portal_rate_limit;
+  if want < 1 then raise exception 'FAIL: prune fixture is not an ended window'; end if;
+
   select portal_rate_limit_prune() into n;
-  if n <> 1 then raise exception 'FAIL: prune deleted % rows, expected 1', n; end if;
-  select count(*) into n from portal_rate_limit where client_ip = '203.0.113.7';
-  if n <> 2 then raise exception 'FAIL: prune removed live windows (% left, expected 2)', n; end if;
+  if n <> want then raise exception 'FAIL: prune deleted % rows, expected %', n, want; end if;
+
+  if exists (select 1 from portal_rate_limit where client_ip_hmac = sha256('ip:198.51.100.1')) then
+    raise exception 'FAIL: prune left the ended window behind';
+  end if;
+  select count(*) into n from portal_rate_limit;
+  if n <> before - want then
+    raise exception 'FAIL: prune removed live windows (% left, expected %)', n, before - want;
+  end if;
   raise notice 'PASS: portal_rate_limit_prune deletes ended windows and keeps current ones';
 end $$;
 reset role;
@@ -2104,6 +2161,12 @@ reset role;
 -- that is dropped afterwards, so it never looks like part of the schema.
 -- Requires the dblink contrib module (shipped in the postgres:16 image CI
 -- uses) and a superuser running the suite, which the harness already is.
+--
+-- Clock-independent: these are 1000 separate transactions, so a run that
+-- straddles a UTC-midnight boundary legitimately splits each bucket across
+-- two windows. The assertion is therefore on the total over windows (no
+-- increment lost) and on at most two rows per bucket (one per window — the
+-- unique index makes a duplicate within a window impossible anyway).
 create schema test37;
 create extension dblink schema test37;
 do $$
@@ -2112,7 +2175,7 @@ declare
                           current_database(), current_user, current_setting('port'),
                           split_part(current_setting('unix_socket_directories'), ',', 1));
   q text := 'select ip_hits, token_hash_prefix_hits from public.portal_rate_limit_hit('
-         || '''192.0.2.37'', ''\x37373737''::bytea, 86400)';
+         || 'sha256(''ip:192.0.2.37''), ''\x3737373737373737''::bytea, 86400)';
   c int; i int; r record;
 begin
   for c in 1..4 loop
@@ -2133,16 +2196,17 @@ begin
   end loop;
 
   select
-    max(hits) filter (where client_ip = '192.0.2.37')                as ip,
-    max(hits) filter (where token_hash_prefix = '\x37373737'::bytea) as pref,
-    count(*)                                                         as nrows
-  into r from portal_rate_limit
-  where client_ip = '192.0.2.37' or token_hash_prefix = '\x37373737'::bytea;
-  if r.ip is distinct from 1000 or r.pref is distinct from 1000 or r.nrows <> 2 then
-    raise exception 'FAIL: concurrent hits: ip=% prefix=% rows=% (expected 1000, 1000, 2)',
-      r.ip, r.pref, r.nrows;
+    sum(hits)  filter (where client_ip_hmac = sha256('ip:192.0.2.37'))          as ip,
+    count(*)   filter (where client_ip_hmac = sha256('ip:192.0.2.37'))          as ip_rows,
+    sum(hits)  filter (where token_hash_prefix = '\x3737373737373737'::bytea)   as pref,
+    count(*)   filter (where token_hash_prefix = '\x3737373737373737'::bytea)   as pref_rows
+  into r from portal_rate_limit where window_seconds = 86400;
+  if r.ip is distinct from 1000 or r.pref is distinct from 1000
+     or r.ip_rows not between 1 and 2 or r.pref_rows not between 1 and 2 then
+    raise exception 'FAIL: concurrent hits: ip=% (% rows) prefix=% (% rows); expected 1000 each in 1-2 windows',
+      r.ip, r.ip_rows, r.pref, r.pref_rows;
   end if;
-  raise notice 'PASS: 4 backends x 250 concurrent hits counted exactly 1000 per bucket, one row each';
+  raise notice 'PASS: 4 backends x 250 concurrent hits counted exactly 1000 per bucket';
 end $$;
 drop schema test37 cascade;
 -- =============================================================
