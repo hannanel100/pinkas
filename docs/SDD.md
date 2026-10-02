@@ -501,10 +501,9 @@ Implemented twice, deliberately, and each implementation is the source of truth 
 * **`assessRisk()` in `lib/domain/risk.ts` ranks the Today screen — online and offline alike.** Online, it is fed the aggregate columns `today_screen` returns; offline (§15), `summariseCourse()` builds the same input from cached rows. One function either way, so the screen cannot change its answer when she loses signal. Its fixture table (§17.2) is the contract.
 * **`v_course_risk` in `schema.sql` is the source of truth for the nightly job (§8.4)** — which runs in-database and cannot call TypeScript — and is the SQL half of the agreement `schema.test.sql` asserts tier by tier.
 
-The two must still agree tier for tier, because a disagreement now shows up as the nightly notification contradicting the screen. Two places they knowingly do not, both accepted in ADR-0008:
+The two must still agree tier for tier, because a disagreement now shows up as the nightly notification contradicting the screen. One place they knowingly do not, accepted in ADR-0008:
 
 * **`high` is still decided in SQL.** `stale_cancellations` is counted inside the view's aggregate with the 7-day threshold embedded, and arrives at `risk.ts` pre-counted. Online and offline can therefore still differ on this one tier. Removing that would mean shipping every session to the server.
-* **`risk.ts` reads boundaries in whole civil days** (§9.4) where the view compares timestamps, so at the 21-day boundary it escalates no earlier than the view, and up to a few hours later. Later is the less-safe direction; it is accepted on §9.3's ground that a one-day boundary error cannot produce a wrong decision at this resolution.
 
 | Level | Condition | `risk_reason_code` |
 |---|---|---|
