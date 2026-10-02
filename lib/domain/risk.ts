@@ -1,7 +1,8 @@
 /**
  * The risk engine — SDD §8.
  *
- * `v_course_risk` in `schema.sql` **is the source of truth**; this module is a
+ * `v_course_risk` (`supabase/migrations/`, last redefined in 0003) **is the
+ * source of truth**; this module is a
  * pure mirror of it for offline use (§15) and for anything that already holds
  * the rows. The two must agree tier for tier and boundary for boundary — the
  * view is owned by the `database` agent, so a change to either is a change to
@@ -11,35 +12,33 @@
  * operands, never a rendered sentence — the sentence is Hebrew and belongs to
  * the translation layer (invariant 8). Never store the rendered sentence.
  *
- * ── Where the mirror is necessarily approximate ────────────────────────────
+ * ── One clock, in civil days (#38) ─────────────────────────────────────────
  *
- * The view compares `timestamptz` values (`s.scheduled_at < now() - interval
- * '7 days'`); this engine works in whole civil days (§9.4). A session done at
- * 10:00 exactly 21 calendar days ago is *not* `< now() - 21 days` at 09:00 and
- * *is* at 11:00 — the view's answer changes during the day, and no day-grained
- * mirror can reproduce that. The mirror takes the strictly-greater reading:
- * exactly 21 days is not yet `medium`, 22 days is. The two therefore agree
- * except within the final hours of the boundary day, which is the smallest
- * possible divergence and it is in the safe direction (the mirror escalates no
- * earlier than the view).
+ * The view computes against `jerusalem_date(now())` — the Israeli civil date —
+ * through `course_risk(p_today date)`, and every time-based tier is a civil-day
+ * comparison in Asia/Jerusalem (§9.4), the same strictly-greater readings this
+ * module takes: a cancellation is stale when its date is before `today - 7`,
+ * a course is `medium` when its last completed session is before `today - 21`.
+ * The two therefore agree exactly, including on the boundary day. (Before
+ * migration 0003 the view compared instants against `now()` in the session
+ * timezone, and this header documented the resulting hours-wide approximation.)
  *
- * ── Where the mirror and the view disagree outright (#42) ──────────────────
+ * Callers converting `timestamptz` to `CalendarDate` for this module must do
+ * so in Asia/Jerusalem, or the agreement is lost at the edge instead.
  *
- * On a course with `target_end_date is null`, they do not agree at all. The
- * view's `greatest(0, target_end_date - current_date)` yields `0` rather than
- * null, because Postgres `greatest()` *ignores* nulls instead of propagating
- * them — so `sessions_remaining > floor(0 / 7.0)` is true and the view ranks a
- * course with no deadline `critical`, reporting `days_to_deadline` as `0`. This
- * module takes the other reading: no deadline, no tier, `daysToDeadline` null.
+ * ── A course with no deadline (#42, decided) ───────────────────────────────
  *
- * That is a real divergence, not an approximation, and #42 settles which side
- * is right. Until it does, do not "fix" either half alone — the two readings
- * are load-bearing in different places (§15 computes risk here when offline,
- * §8.4's nightly job reads the view), so changing one silently makes the same
- * course rank differently depending on which path served the screen.
+ * A course with `target_end_date` null has no `critical` tier and a null
+ * `daysToDeadline` — never `0`. "Won't finish in time" is a claim about a
+ * deadline, and there is none to miss. The view takes the same reading
+ * (migration 0003), stated explicitly rather than left to `greatest()`, which
+ * in Postgres *ignores* nulls (`greatest(0, null) = 0`) instead of propagating
+ * them — which is how the view used to rank such a course `critical`. Both
+ * suites assert the agreed behaviour on the same fixture.
  *
  * Row selection is the caller's job, not this module's: the view restricts to
- * `course.status = 'active'` and `deleted_at is null`, and `lib/data/` applies
+ * `course.status = 'active'` and `deleted_at is null` on both the course and
+ * the bride, and `lib/data/` applies
  * the same filter before calling here.
  *
  * Invariant 4: pure. `today` is injected.
@@ -138,7 +137,11 @@ export type RiskAssessment =
       readonly daysToDeadline: number | null;
     };
 
-/** Mirrors `greatest(0, target_end_date - current_date)`; `null` propagates. */
+/**
+ * Mirrors the view's `days_to_deadline`: `greatest(0, target_end_date - p_today)`,
+ * and `null` when there is no deadline (the view handles the null explicitly,
+ * because Postgres `greatest()` would ignore it and return 0).
+ */
 export function daysToDeadline(
   today: CalendarDate,
   targetEndDate: CalendarDate | null,
@@ -156,8 +159,7 @@ export function assessRisk(input: CourseRiskInput): RiskAssessment {
 
   // critical — sessions remaining > whole weeks to the effective deadline.
   // A null deadline skips the tier: a course with no deadline cannot be failing
-  // to meet one. This is a deliberate *disagreement* with the view rather than a
-  // mirror of it — see the header and #42.
+  // to meet one. The view takes the same reading — see the header.
   if (deadlineDays !== null) {
     const wholeWeeks = Math.floor(deadlineDays / 7);
     if (input.sessionsRemaining > wholeWeeks) {
@@ -277,7 +279,7 @@ export function summariseCourse(args: {
         }
         break;
       case "cancelled":
-        // `scheduled_at < now() - interval '7 days'` — null is never less than
+        // `jerusalem_date(scheduled_at) < p_today - 7` — null is never less than
         // anything in SQL, so an unscheduled cancellation is not stale.
         if (
           session.scheduledOn !== null &&
