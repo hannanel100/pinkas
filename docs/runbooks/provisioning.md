@@ -33,27 +33,22 @@ leaks nothing, structurally.
 
 ## Order of operations: protection before secrets
 
-Staging values may enter Vercel preview/development scopes at any time.
-The **production** service-role key enters the Vercel production scope **last**,
-and only after:
+Staging URL and anon key may enter Vercel preview/development scopes once
+deployment protection is proven on a preview. The **production** service-role
+key enters the Vercel production scope **last**, and only after:
 
-1. deployment protection from #7 is enabled and verified, and
-2. `security` has reviewed the matrix below as applied.
+1. deployment protection is enabled and verified ([vercel.md](./vercel.md), #28),
+2. `security` has reviewed the environment matrix as applied, and
+3. a deployed code path actually reads it (`lib/data/portal.ts`, #7).
 
 ## Environment matrix
 
-Every "absent" is deliberate. Changing any cell is a `security`-reviewed act.
-
-| Variable | Vercel production | Vercel preview | Local dev (`.env.local`) | CI |
-|---|---|---|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | prod project | staging project | staging project | absent — CI runs plain Postgres via `schema.bootstrap.sql` |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | prod anon key | staging anon key | staging anon key | absent |
-| `SUPABASE_SERVICE_ROLE_KEY` | **prod key, production scope only, set last** | staging key only — never the prod key | staging key | absent, deliberately |
-| `SUPABASE_ACCESS_TOKEN` (CLI) | never | never | operator keychain only, not in the file | absent — CI must not be able to rewrite schema |
-| Twilio credentials | held in Supabase Auth settings, not in our env | same | — | — |
-
-Vercel-side wiring (scopes, deployment protection, domains) is ticket #7;
-this matrix is the contract it implements.
+The authoritative matrix — which variable is set in production, preview and
+development, and why each absence is deliberate — lives in
+[vercel.md](./vercel.md#environment-matrix), next to the scopes it describes.
+It was moved there from this file by #28, which also settled one cell this
+runbook had left open: **previews get no service-role key at all**, not even
+staging's.
 
 ## OTP provider
 
@@ -116,13 +111,14 @@ secret goes.
    ```
 
 6. **Live RLS verification** (real JWTs — the first contact of invariant 1
-   with a real auth.uid()). In your shell, set for one session, values from
-   the staging dashboard only: LIVE_SUPABASE_URL, LIVE_SUPABASE_ANON_KEY,
-   LIVE_SUPABASE_SERVICE_ROLE_KEY. Then:
+   with a real auth.uid()). In your shell, for one session, values from the
+   staging dashboard only: LIVE_SUPABASE_URL, LIVE_SUPABASE_ANON_KEY,
+   LIVE_SUPABASE_SERVICE_ROLE_KEY. Enter the service-role key with `read -rs`,
+   so it is neither echoed nor left in shell history:
 
    ```bash
+   read -rs LIVE_SUPABASE_SERVICE_ROLE_KEY; export LIVE_SUPABASE_SERVICE_ROLE_KEY
    PINKAS_LIVE_TEST=staging node scripts/test-live-rls.mjs
-   # and when done:
    unset LIVE_SUPABASE_SERVICE_ROLE_KEY
    ```
 
@@ -140,10 +136,10 @@ secret goes.
    5. Set the rate limits listed above.
    6. Send one test OTP to an Israeli number and record delivery (screenshot
       or note) on the ticket.
-8. **Staging keys into Vercel** (coordinates with the Vercel ticket):
-   staging URL + anon key into preview and development scopes; the staging
-   service-role key into preview only if and when a preview actually needs
-   the portal path.
+8. **Staging keys into Vercel** — done under #28, in the order
+   [vercel.md](./vercel.md#human-checklist) sets: protection proven first, then
+   the staging URL + anon key into preview and development scopes. No
+   service-role key in either scope (decision in vercel.md).
 9. **Storage buckets** — nothing to create yet; the materials ticket adds
    the private bucket and its policy here when it lands.
 10. **pg_cron** — nothing to schedule yet; the nightly risk job (SDD §8.4)
@@ -152,7 +148,7 @@ secret goes.
 ### Phase B — production, later (ordered — do not reorder)
 
 Triggers, whichever comes first: real bride data is about to exist (beta
-users), or the Vercel ticket is ready to wire the production environment.
+users), or #28 is ready to wire the production environment.
 Do not create the production project "to have it" — an empty production
 project is a standing credential with nothing to protect yet.
 
@@ -180,8 +176,9 @@ project is a standing credential with nothing to protect yet.
    project, same Twilio Verify service, same rate limits.
 5. **Keys into Vercel, protection first:** prod URL + anon key into the
    production scope; the prod service-role key goes in **last**, production
-   scope only, after the Vercel ticket's deployment protection is on and
-   `security` has signed off on the environment matrix as applied.
+   scope only, after deployment protection is proven, `security` has signed
+   off on the environment matrix as applied, and `lib/data/portal.ts` is
+   deployed — [vercel.md](./vercel.md#human-checklist) steps 11–12.
 6. **Restore drill** — before real bride data arrives, perform one PITR
    restore of the prod project to a scratch project and diff the schema
    (SDD §16.1: an untested backup is not a backup). Record the date here.
