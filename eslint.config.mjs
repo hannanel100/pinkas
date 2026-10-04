@@ -129,6 +129,12 @@ const riskTokenSyntax = [
  * an identifier (`process.env.SUPABASE_SERVICE_ROLE_KEY`), a string
  * (`process.env["…"]`) or inside a template. scripts/ is exempt — the staging
  * harness lives there.
+ *
+ * This is a TRIPWIRE, not the control. It is lexical: string concatenation
+ * (`"SUPABASE_SERVICE" + "_ROLE_KEY"`) or iterating `process.env` walks past it.
+ * The control is ADR-0010 §3 — the key is in no deployed environment, so code
+ * that found a way to name it would still read `undefined`. The lint exists to
+ * make the honest mistake loud, not to stop a determined one.
  */
 const SERVICE_KEY = /SUPABASE_SERVICE_ROLE_KEY/;
 const SERVICE_KEY_MESSAGE =
@@ -176,7 +182,7 @@ const supabaseClientPaths = [
  * would be the old design returning; importing one is an error everywhere.
  */
 const serviceRolePattern = {
-  group: ["@/lib/supabase/service", "**/supabase/service"],
+  group: ["@/lib/supabase/service", "**/supabase/service", "./service", "../supabase/service"],
   message:
     "There is no service-role client (invariant 5, ADR-0010). The portal reads through PORTAL_DATABASE_URL in lib/data/portal.ts only, which calls only the portal_* functions.",
 };
@@ -188,7 +194,7 @@ const serviceRolePattern = {
  * a function that does not log cannot obtain a client (#7 design challenge).
  */
 const userClientPattern = {
-  group: ["@/lib/supabase/user", "**/supabase/user"],
+  group: ["@/lib/supabase/user", "**/supabase/user", "../supabase/user", "../../supabase/user"],
   message:
     "Only lib/data/context.ts may import the user-JWT client (invariant 3, SDD §13). Define the access as a defineRead/defineMutation in lib/data/ — that is what writes the access log.",
 };
@@ -199,14 +205,14 @@ const userClientPattern = {
  * bride-data access is lib/data/, and that is only true if it is the only
  * place access can be defined.
  */
-const defineOutsideDataPaths = [
-  {
-    name: "@/lib/data/context",
-    importNames: ["defineRead", "defineMutation"],
-    message:
-      "Data functions are defined in lib/data/ only (invariant 3, SDD §13). Import the function you need from its lib/data/ module.",
-  },
-];
+const defineOutsidePattern = {
+  // A `patterns` entry, not `paths`: `paths` matches the literal specifier
+  // only, so `../../../lib/data/context` walked straight past it (#60 review).
+  group: ["@/lib/data/context", "**/data/context"],
+  importNames: ["defineRead", "defineMutation"],
+  message:
+    "Data functions are defined in lib/data/ only (invariant 3, SDD §13). Import the function you need from its lib/data/ module.",
+};
 
 /** Invariant 4 — lib/domain/ imports nothing that does I/O. SDD §2.4. */
 const domainPurityPattern = {
@@ -229,23 +235,35 @@ const domainPurityPattern = {
     "lib/domain/ does no I/O and imports nothing from the data or framework layers (invariant 4, SDD §2.4). This is what makes the fixture tests in §17.2 possible.",
 };
 
+/**
+ * Each instructor module in all three forms an import can take: the alias,
+ * a relative path through `data/` (from app/(portal)/), and a sibling path
+ * (from lib/data/portal.ts). Gitignore-style groups match the specifier text,
+ * not the resolved file, so every form has to be named (#60 review).
+ */
+const INSTRUCTOR_DATA_MODULES = [
+  "brides",
+  "courses",
+  "sessions",
+  "records",
+  "today",
+  "instructor",
+  "context",
+  "audit",
+  "internal/records",
+];
 const portalCannotReachInstructorData = {
-  group: [
-    "@/lib/data/brides",
-    "@/lib/data/courses",
-    "@/lib/data/sessions",
-    "@/lib/data/records",
-    "@/lib/data/today",
-    "@/lib/data/instructor",
-    "@/lib/data/context",
-    "@/lib/supabase/user",
-  ],
+  group: INSTRUCTOR_DATA_MODULES.flatMap((m) => [
+    `@/lib/data/${m}`,
+    `**/data/${m}`,
+    `./${m}`,
+  ]),
   message:
     "The bride portal is Path 2 (untrusted). It reaches the database through lib/data/portal.ts and nothing else — PORTAL_DATABASE_URL, the portal_* functions only (invariant 5, ADR-0010, SDD §2.3).",
 };
 
 const instructorCannotReachPortalData = {
-  group: ["@/lib/data/portal", "**/data/portal"],
+  group: ["@/lib/data/portal", "**/data/portal", "./portal", "../portal"],
   message:
     "Instructor code must not import lib/data/portal.ts — it holds PORTAL_DATABASE_URL and calls only the portal_* functions (invariant 5, ADR-0010, SDD §13).",
 };
@@ -274,8 +292,8 @@ const eslintConfig = defineConfig([
       "no-restricted-imports": [
         "error",
         {
-          paths: [...supabaseClientPaths, ...defineOutsideDataPaths],
-          patterns: [serviceRolePattern, userClientPattern],
+          paths: supabaseClientPaths,
+          patterns: [serviceRolePattern, userClientPattern, defineOutsidePattern],
         },
       ],
     },
@@ -325,7 +343,37 @@ const eslintConfig = defineConfig([
         "error",
         {
           paths: supabaseClientPaths,
-          patterns: [serviceRolePattern, portalCannotReachInstructorData],
+          patterns: [
+            serviceRolePattern,
+            userClientPattern,
+            portalCannotReachInstructorData,
+          ],
+        },
+      ],
+    },
+  },
+
+  {
+    // Test doubles and the test-only PostgREST client factory (which builds a
+    // client on any JWT it is handed) are reachable from tests only (#60
+    // review). A different rule from no-restricted-imports, and resolved-path
+    // based, so it neither collides with the blocks above nor misses a
+    // relative specifier.
+    name: "pinkas/test-support-is-test-only",
+    files: ["**/*.{ts,tsx,mts}"],
+    ignores: ["**/*.test.{ts,tsx}", "lib/data/testing/**", "lib/supabase/testing/**"],
+    rules: {
+      "import/no-restricted-paths": [
+        "error",
+        {
+          zones: [
+            {
+              target: "./",
+              from: ["./lib/data/testing", "./lib/supabase/testing"],
+              message:
+                "Test support is importable from *.test.ts only — it fakes or bypasses the access log (#60 review).",
+            },
+          ],
         },
       ],
     },
@@ -396,7 +444,11 @@ const eslintConfig = defineConfig([
         "error",
         {
           paths: supabaseClientPaths,
-          patterns: [serviceRolePattern, portalCannotReachInstructorData],
+          patterns: [
+            serviceRolePattern,
+            userClientPattern,
+            portalCannotReachInstructorData,
+          ],
         },
       ],
     },
@@ -408,10 +460,11 @@ const eslintConfig = defineConfig([
       "no-restricted-imports": [
         "error",
         {
-          paths: [...supabaseClientPaths, ...defineOutsideDataPaths],
+          paths: supabaseClientPaths,
           patterns: [
             serviceRolePattern,
             userClientPattern,
+            defineOutsidePattern,
             instructorCannotReachPortalData,
           ],
         },
