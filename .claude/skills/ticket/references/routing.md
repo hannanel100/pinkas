@@ -62,8 +62,8 @@ most code. If two agents own equal weight, split the ticket.
   `PORTAL_DATABASE_URL`, or the service-role key, including as an environment variable. Since
   ADR-0010 the service-role key belongs in no deployed environment at all, so a ticket that needs
   it there is a design question for `database` and `security` first, not a deploy step. Invariant 5
-  is enforced by lint inside the codebase and by the database's grants (migration 0008), and by
-  nobody at all in a hosting provider's settings panel.
+  is enforced by the database's grants (migration 0008), tripwired by lint inside the codebase
+  (from #60), and checked by nobody at all in a hosting provider's settings panel.
 * **`challenger` is never a routing answer.** It owns no surface and no ticket; it enters through
   the `**Challenge:** yes` field at dispatch time. If you are tempted to route a ticket to it, what
   you actually want is `**Challenge:** yes` on a ticket owned by someone else.

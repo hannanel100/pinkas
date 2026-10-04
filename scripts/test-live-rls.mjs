@@ -268,14 +268,22 @@ async function fullSuite() {
     }
     {
       const res = await admin.from("bride").insert({ tenant_id: A, first_name: "ServiceKeyWrite" }).select("id");
-      check(refused(res), "service key: insert into bride refused", res.error ? "" : `inserted ${res.data?.length}`);
+      check(
+        refused(res) && res.error.code === "42501",
+        "service key: insert into bride refused (42501)",
+        res.error ? `${res.error.code} ${res.error.message}` : `inserted ${res.data?.length}`,
+      );
     }
     for (const [who, client] of [["service key", admin], ["instructor JWT", a]]) {
       const res = await client.rpc("portal_resolve_token", {
         p_token_hash: "\\x" + "00".repeat(32),
         p_request_id: randomUUID(),
       });
-      check(refused(res), `${who}: portal_resolve_token not callable through PostgREST`, res.error ? "" : "call succeeded");
+      check(
+        refused(res) && res.error.code === "42501",
+        `${who}: portal_resolve_token not callable through PostgREST (42501)`,
+        res.error ? `${res.error.code} ${res.error.message}` : "call succeeded",
+      );
     }
 
     console.log("\n== tenant isolation, view invocation, write-side checks ==");

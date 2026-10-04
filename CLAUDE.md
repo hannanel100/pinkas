@@ -97,10 +97,10 @@ The split between `backend` and `database` is not organisational tidiness: in th
 *is* the security boundary (invariants 1, 2, 5), so a one-line migration can carry more consequence
 than a large feature, and it should be written and reviewed as such.
 
-`infra` exists for the same reason, one step further out. Invariant 5 is enforced by lint inside the
-codebase and by the database's grants (migration 0008), and by nothing at all in a hosting
-provider's settings panel: there a credential is a string in a text field, and a preview deployment
-is public by default. The environment is
+`infra` exists for the same reason, one step further out. Invariant 5 is enforced by the database's
+grants (migration 0008) and tripwired by lint inside the codebase (from #60), and by nothing at all
+in a hosting provider's settings panel: there a credential is a string in a text field, and a
+preview deployment is public by default. The environment is
 therefore the weakest point in the isolation design, and it deserves an owner rather than being
 whoever happened to be deploying. The line against `qa` is what the work is *for* — `qa` proves the
 code correct, `infra` delivers correct code to production, and `ci.yml` stays with `qa`.

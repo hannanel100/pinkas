@@ -25,8 +25,11 @@
 #                       Step 4 runs read-only (default_transaction_read_only).
 #   LIVE_PORTAL_DB_URL  the portal_reader login (#56). Step 4 makes one failed
 #                       lookup with it, which by design writes nothing.
-# Both must point at the SAME project as the link; step 4 checks that the
-# two connections see the same database system identifier.
+# Both must point at the SAME project as the link: step 4 checks that each
+# URL names the linked project ref, and — where pg_control_system() is
+# readable by both roles — that both connections report the same database
+# system identifier. The URLs never reach psql's argv with their password:
+# it is split off into PGPASSWORD for that one invocation (see pq below).
 # docs/runbooks/migrations.md
 #
 # Self-test of the step-3 filter, no project or Docker needed:
@@ -231,11 +234,27 @@ if ! command -v psql >/dev/null 2>&1; then
   exit 2
 fi
 
+# Runs psql against a connection URL without putting its password on the
+# command line (argv is world-readable through /proc and `ps`): the password
+# is percent-decoded into PGPASSWORD, set for this one invocation only, and
+# the URL psql sees carries user, host and options but no secret.
+pq() {
+  local url=$1 bare pw=""
+  shift
+  bare=$url
+  if [[ "$url" =~ ^(postgres(ql)?://)([^:/@?#]*):([^@/?#]*)@(.*)$ ]]; then
+    bare="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[5]}"
+    pw="${BASH_REMATCH[4]}"
+    pw=$(printf '%b' "${pw//%/\\x}")
+  fi
+  PGPASSWORD="${pw:-${PGPASSWORD:-}}" psql "$bare" "$@"
+}
+
 # 4a. Catalogue, as the migration role, read-only. Every violation is
 # collected and printed; any violation fails the step. Objects owned by a
 # platform role (e.g. supabase_admin's public.rls_auto_enable(), see the
 # allowlist above) are reported as NOTE lines, never silently skipped.
-if ! PGOPTIONS='-c default_transaction_read_only=on' psql "$LIVE_DB_URL" \
+if ! PGOPTIONS='-c default_transaction_read_only=on' pq "$LIVE_DB_URL" \
      -X -q -v ON_ERROR_STOP=1 -At <<'SQL'
 do $$
 declare
@@ -376,6 +395,85 @@ begin
     end if;
   end loop;
 
+  -- membership: nobody but the migration role (or a superuser) may act as a
+  -- portal role, directly or through another role (security review of #61)
+  for r in
+    select g.rolname, t.portal
+    from pg_roles g, (values ('portal_owner'), ('portal_reader')) t(portal)
+    where pg_has_role(g.oid, t.portal::regrole, 'MEMBER')
+      and g.rolname <> t.portal and g.oid <> me and not g.rolsuper
+  loop
+    bad := bad || format('%s is a member of %s', r.rolname, r.portal);
+  end loop;
+
+  -- every other schema: what the portal roles can reach outside public.
+  -- A grant made TO the role is a failure; one inherited from PUBLIC is a
+  -- platform/Postgres default and is reported, not judged.
+  foreach role in array array['portal_reader','portal_owner'] loop
+    for r in
+      select n.oid, n.nspname, n.nspacl
+      from pg_namespace n
+      where n.nspname not in ('pg_catalog','information_schema','public')
+        and n.nspname not like 'pg_toast%' and n.nspname not like 'pg_temp%'
+    loop
+      if exists (select 1 from aclexplode(coalesce(r.nspacl, acldefault('n', 0))) a
+                 where a.grantee = role::regrole) then
+        bad := bad || format('%s holds a direct grant on schema %s', role, r.nspname);
+      end if;
+      if has_schema_privilege(role, r.oid, 'CREATE') then
+        raise notice 'NOTE: % can CREATE in schema % (via PUBLIC)', role, r.nspname;
+      end if;
+      if has_schema_privilege(role, r.oid, 'USAGE') then
+        raise notice 'NOTE: % has USAGE on schema % (via PUBLIC); % function(s) there are executable by it',
+          role, r.nspname,
+          (select count(*) from pg_proc p
+           where p.pronamespace = r.oid and has_function_privilege(role, p.oid, 'EXECUTE'));
+      end if;
+      if exists (select 1 from pg_proc p, aclexplode(p.proacl) a
+                 where p.pronamespace = r.oid and a.grantee = role::regrole) then
+        bad := bad || format('%s holds a direct EXECUTE grant on a function in schema %s', role, r.nspname);
+      end if;
+    end loop;
+
+    -- the database itself: TEMP comes through PUBLIC on every Postgres
+    -- database; the portal functions are immune to it (search_path pinned,
+    -- names qualified), so it is reported, not failed. A direct grant fails.
+    if exists (select 1 from pg_database d, aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+               where d.datname = current_database() and a.grantee = role::regrole) then
+      bad := bad || format('%s holds a direct grant on the database', role);
+    end if;
+    if has_database_privilege(role, current_database(), 'TEMP') then
+      raise notice 'NOTE: % holds TEMP on the database (via PUBLIC; neutralised by the functions'' search_path)', role;
+    end if;
+  end loop;
+
+  -- global default privileges (not per schema): the migration role must
+  -- keep 0005's removal of PUBLIC's EXECUTE on new functions, and must not
+  -- default-grant anything to the contained roles anywhere.
+  if not exists (select 1 from pg_default_acl d
+                 where d.defaclrole = me and d.defaclnamespace = 0 and d.defaclobjtype = 'f')
+     or exists (select 1 from pg_default_acl d, aclexplode(d.defaclacl) a
+                where d.defaclrole = me and d.defaclnamespace = 0 and d.defaclobjtype = 'f'
+                  and a.grantee = 0) then
+    bad := bad || 'global default privileges of the migration role give PUBLIC EXECUTE on new functions (0005 removed it)'::text;
+  end if;
+  for r in
+    select d.defaclobjtype, d.defaclrole::regrole::text as definer,
+           case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end as grantee
+    from pg_default_acl d, aclexplode(d.defaclacl) a
+    where d.defaclnamespace = 0
+      and a.grantee in (0, 'service_role'::regrole, 'portal_reader'::regrole,
+                        'portal_owner'::regrole, 'anon'::regrole, 'authenticated'::regrole)
+      and a.grantee <> d.defaclrole
+  loop
+    if r.definer = me::text and r.grantee <> 'PUBLIC' then
+      bad := bad || format('global default privileges of %s grant %s on objtype %s',
+                           r.definer, r.grantee, r.defaclobjtype);
+    elsif r.definer <> me::text then
+      raise notice 'NOTE: platform role % globally default-grants % on objtype %', r.definer, r.grantee, r.defaclobjtype;
+    end if;
+  end loop;
+
   -- the portal surface is still exactly seven columns
   if (select string_agg(column_name, ',' order by ordinal_position)
       from information_schema.columns
@@ -411,15 +509,27 @@ for var in LIVE_DB_URL LIVE_PORTAL_DB_URL; do
     exit 1
   fi
 done
-who=$(psql "$LIVE_PORTAL_DB_URL" -X -q -At -c "select current_user" 2>&1 || true)
+who=$(pq "$LIVE_PORTAL_DB_URL" -X -q -At -c "select current_user" 2>&1 || true)
 if [[ "$who" != "portal_reader" ]]; then
   echo "FAIL: LIVE_PORTAL_DB_URL did not log in as portal_reader: $who" >&2
   exit 1
 fi
+sysid_sql="select system_identifier from pg_control_system()"
+sysid_admin=$(pq "$LIVE_DB_URL" -X -q -At -c "$sysid_sql" 2>/dev/null || true)
+sysid_portal=$(pq "$LIVE_PORTAL_DB_URL" -X -q -At -c "$sysid_sql" 2>/dev/null || true)
+if [[ -n "$sysid_admin" && -n "$sysid_portal" ]]; then
+  if [[ "$sysid_admin" != "$sysid_portal" ]]; then
+    echo "FAIL: LIVE_DB_URL and LIVE_PORTAL_DB_URL reach different database systems" >&2
+    exit 1
+  fi
+  echo "OK: both connections reach database system $sysid_admin"
+else
+  echo "NOTE: pg_control_system() is not readable by both roles; same-project check rests on the project ref"
+fi
 
 expect_42501() {
   local label=$1 sql=$2 out
-  out=$(psql "$LIVE_PORTAL_DB_URL" -X -q -At -v VERBOSITY=sqlstate -c "$sql" 2>&1 || true)
+  out=$(pq "$LIVE_PORTAL_DB_URL" -X -q -At -v VERBOSITY=sqlstate -c "$sql" 2>&1 || true)
   if [[ "$out" == *"42501"* ]]; then
     echo "OK: as portal_reader, $label -> 42501"
   else
@@ -434,7 +544,7 @@ expect_42501 "select from access_log"             "select 1 from public.access_l
 
 # A lookup of a hash no bride can hold: zero rows, and — by design — no
 # access_log row, so this is safe on production.
-n=$(psql "$LIVE_PORTAL_DB_URL" -X -q -At -v ON_ERROR_STOP=1 \
+n=$(pq "$LIVE_PORTAL_DB_URL" -X -q -At -v ON_ERROR_STOP=1 \
       -c "select count(*) from public.portal_resolve_token(sha256('verify-live-schema: not a token'), gen_random_uuid())" 2>&1) || {
   echo "FAIL: as portal_reader, portal_resolve_token could not be called: $n" >&2
   exit 1

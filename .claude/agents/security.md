@@ -44,7 +44,8 @@ not a finding.
 
 **3. Portal credential and service-role containment** (invariant 5, ADR-0010, migration 0008)
 * `SUPABASE_SERVICE_ROLE_KEY` appears nowhere under `app/`, `lib/` or `components/` — no
-  construction site, no env read, no fallback. `scripts/` (the staging harness, `auth.admin` only)
+  construction site, no env read, no fallback. Lint carries a lexical tripwire for this and for the
+  next rule from #60; a tripwire is not proof, so grep regardless. `scripts/` (the staging harness, `auth.admin` only)
   is the one exemption. A service key in any deployed environment is a critical finding: it is
   also the GoTrue admin credential, so it can sign in as any instructor.
 * `PORTAL_DATABASE_URL` is read in `lib/data/portal.ts` only, and that module calls only the
@@ -58,9 +59,14 @@ not a finding.
 * Each portal lookup takes the token **hash** and nothing else that selects rows. A new portal
   function with a `bride_id`, `tenant_id` or free-filter parameter is a critical finding: the hash
   predicate inside the function is the entire row boundary on this path.
-* Portal reads log themselves (`('bride_portal', bride_id)`, in the same statement). Check that
-  `portal.ts` does not wrap a lookup in a transaction it rolls back, and does not add a second,
-  application-level `logAccess` for the same read.
+* Portal reads log themselves (`('bride_portal', bride_id)`, in the same statement) — completely
+  only for a caller that commits. Check that `portal.ts` calls each portal function as a plain
+  autocommit `SELECT`, never inside a transaction (a rollback keeps the rows and drops the log
+  row), and does not add a second, application-level `logAccess` for the same read.
+* Every `SECURITY DEFINER` function sets `search_path = pg_catalog, pg_temp` and qualifies its
+  types and relations. `search_path = ''` is a finding: Postgres still searches `pg_temp` first for
+  type and relation names, and any role with TEMP (PUBLIC has it) can plant a domain that runs code
+  as the owner (security review of #61).
 * `app/p/` imports no instructor data module; instructor code imports no `portal.ts`.
 
 **4. Portal tokens**

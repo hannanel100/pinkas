@@ -220,9 +220,15 @@ its access path needs, and to no one else:
   service-role key (ADR-0010 §3), and a grant to it is a grant to a
   `BYPASSRLS` role.
 
-The platform's default privileges still grant `EXECUTE` on a new function to
-`anon` and `authenticated` directly, so a function `authenticated` must not
-call still needs an explicit `revoke execute ... from authenticated`. The
+The platform's default privileges would grant `EXECUTE` on every new function
+to `anon`, `authenticated` and `service_role`; `0005` removed those defaults
+for `anon`, `authenticated` and `PUBLIC`, and `0008` for `service_role`, so a
+new function is executable by its owner alone until a migration grants it.
+Grant explicitly; a defensive `revoke` next to the grant is welcome but no
+longer load-bearing. Every `SECURITY DEFINER` function sets
+`search_path = pg_catalog, pg_temp` and schema-qualifies its types and
+relations — never `search_path = ''`, which still searches `pg_temp` first
+for type and relation names (security review of #61). The
 `#31` and `#53` sections of `schema.test.sql` enumerate every object in
 `public` for every one of these roles, so a migration that breaks this fails
 CI; `verify-live-schema.sh` step 4 asserts the same on the live project.

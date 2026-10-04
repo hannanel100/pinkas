@@ -37,7 +37,9 @@ cost, not an oversight.
 
 So:
 
-* Every exported function in `lib/data/` calls `logAccess`. No exceptions, including reads.
+* Every exported function in `lib/data/` calls `logAccess`, reads included. The one exception is
+  the portal lookups, which write their own row in the database (below) and must not be logged
+  twice.
 * The access log holds identifiers and actions — **never content**. No note bodies, ever.
 * `access_log` has no foreign key to `bride`, so it survives hard deletion of what it describes.
   Do not "fix" that with a constraint.
@@ -50,20 +52,26 @@ It is the only module that reads `PORTAL_DATABASE_URL` and the only one importab
 The boundary is enforced in both directions: `app/p/` cannot import instructor data modules, and
 instructor modules cannot import `portal.ts`. `SUPABASE_SERVICE_ROLE_KEY` is read nowhere under
 `app/`, `lib/` or `components/` — the service key is in no deployed environment (ADR-0010 §3).
+Lint carries a lexical tripwire for both rules from #60; the real control is ADR-0010's grants,
+which hold whatever the code says.
 When you touch it:
 
 * Connect as `portal_reader` over the Postgres wire protocol (Supavisor, transaction mode):
   `prepare: false`, TLS, `max: 1` per lambda, `idle_timeout` 20 s, `connect_timeout` 5 s. This is
   not a Supabase client and goes nowhere near PostgREST.
 * Call the `portal_*` functions and nothing else — `portal_resolve_token(hash, request_id)`,
-  `portal_sessions(hash, request_id)`, `portal_rate_limit_hit(...)`. The role can do nothing else;
-  the database refuses a table or view read with `42501`.
+  `portal_sessions(hash, request_id)`, `portal_rate_limit_hit(...)`. The role can do nothing else:
+  the database refuses a table or view read with `42501`, and the functions pin
+  `search_path = pg_catalog, pg_temp` so temp objects created on the connection cannot reach them.
 * Hash the incoming token (sha256, 32 bytes) and pass the hash. The `portal_token_hash = $1`
   predicate lives inside the functions; there is no `bride_id` parameter to get wrong, and expiry,
   revocation and soft delete are enforced by `portal_bride_view` underneath them.
 * The lookups write their own `('bride_portal', bride_id)` access-log row in the same statement.
-  Do **not** call `logAccess` for them, and never run them inside a transaction you roll back —
-  the log row goes with it.
+  That log is complete **for any caller that commits** — not for every caller: on the wire
+  protocol the caller owns the transaction, and a rollback discards the log row while the rows
+  have already been returned. So: call each portal function as a plain autocommit `SELECT`.
+  **Never wrap a portal call in a transaction** (`begin`/`sql.begin()`), and never one that is
+  rolled back. Do **not** call `logAccess` for these reads.
 * The functions return `portal_session_view`'s seven columns at most. Never join to
   `session_record`, never widen the view; a new portal need is a new `portal_*` function, owned by
   `database`.

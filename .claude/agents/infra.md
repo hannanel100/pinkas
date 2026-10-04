@@ -23,13 +23,15 @@ a testing concern end to end. Everything downstream of a green build is yours.
 
 ## The thing that makes this repo different
 
-**Invariant 5 is enforced inside the codebase and inside the database — and by nobody in a settings
-panel.** `eslint` proves that `PORTAL_DATABASE_URL` is read only in `lib/data/portal.ts` and that
-`SUPABASE_SERVICE_ROLE_KEY` is read nowhere under `app/`, `lib/` or `components/`. From migration
-0008 the database proves that `portal_reader` can call three functions and nothing else, and that
-`service_role` holds nothing in `public` (ADR-0010). Nothing proves what is typed into a hosting
-provider's environment panel, where a credential is a string in a text field next to a checkbox
-that decides who can reach the deployment carrying it.
+**Invariant 5 is enforced inside the database, tripwired inside the codebase — and by nobody in a
+settings panel.** From migration 0008 the database enforces that `portal_reader` can call three
+functions and nothing else, and that `service_role` holds nothing in `public` (ADR-0010) — that is
+the real control. From #60, lint adds a lexical tripwire: `PORTAL_DATABASE_URL` read outside
+`lib/data/portal.ts`, or `SUPABASE_SERVICE_ROLE_KEY` named under `app/`, `lib/` or `components/`,
+is an error. A tripwire catches the obvious mistake; it proves nothing about a key that arrives by
+another name. And nothing at all checks what is typed into a hosting provider's environment panel,
+where a credential is a string in a text field next to a checkbox that decides who can reach the
+deployment carrying it.
 
 So the environment is where the isolation design is weakest, and the specific traps are these:
 

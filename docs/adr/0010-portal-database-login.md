@@ -35,6 +35,8 @@ The #37 review asked whether forgetting the filter could be made impossible rath
   * `portal_owner` gets `INSERT` on `access_log`, with a policy that allows only `actor_kind = 'bride_portal'`. 0001's CHECK already allows that value.
   * The portal route handler therefore does **not** call `logAccess`. ADR-0011's exchange and render rely on the functions' own rows.
 
+  > **Qualified by the #53 security review ([#61](https://github.com/hannanel100/pinkas/pull/61)).** "Complete by construction" holds only for a caller that commits. Over the wire protocol the caller owns the transaction: `begin; select … from portal_sessions(…); rollback;` returns the rows and discards the log row. Doing that needs both `PORTAL_DATABASE_URL` and a valid token hash, so it is a narrower gap than the one this ADR closes, but the claim above overstates it. The accurate statement is: **portal logging is complete for any caller that commits, and `lib/data/portal.ts` must never wrap a portal call in a transaction, let alone one it rolls back.** The text above is kept as the record of what was decided.
+
 ### 3. The service-role key leaves every deployed environment
 
 * `SUPABASE_SERVICE_ROLE_KEY` is in **no Vercel scope**: not production, not preview, not development. The production key lives in the operator's keychain only. The staging key is used by the staging harness only.
