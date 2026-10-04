@@ -200,6 +200,7 @@ describe("defineRead — none and database", () => {
     // The reviewer's probe, verbatim in shape: an unlogged "none" read of bride.
     expect(() =>
       defineRead({ resource: "bride", subjects: "none" }, async (ctx) =>
+        // @ts-expect-error — and since the re-review a "none" body has no db at all.
         (await ctx.db.from("bride").select("*")).data,
       ),
     ).toThrow(AuditViolationError);
@@ -209,6 +210,39 @@ describe("defineRead — none and database", () => {
         defineMutation({ resource, action: "update", subjects: "none" }, async () => null),
       ).toThrow(AuditViolationError);
     }
+    expect(fake.queries).toHaveLength(0);
+  });
+
+  it("a 'none' body under the allowed resource still cannot read a table — it has no client (#60 re-review)", async () => {
+    // The re-review's probe: resource "instructor" is allowed, so the define
+    // succeeds — but the body has nothing to query bride with.
+    const probe = defineRead({ resource: "instructor", subjects: "none" }, async (ctx) => {
+      const db = (ctx as unknown as { db?: { from(t: string): { select(c: string): unknown } } }).db;
+      if (db) return db.from("bride").select("*");
+      return "no client";
+    });
+    await expect(probe()).resolves.toBe("no client");
+    expect(fake.queries).toHaveLength(0);
+  });
+
+  it("a 'none' body's rpc reaches the allowlist only, even when the type is cast away", async () => {
+    const sneaky = defineMutation(
+      { resource: "instructor", action: "update", subjects: "none" },
+      async (ctx) =>
+        (ctx.rpc as unknown as (n: string, a: object) => Promise<unknown>)("read_session_records", {
+          p_session_ids: [],
+        }),
+    );
+    await expect(sneaky()).rejects.toBeInstanceOf(AuditViolationError);
+    expect(fake.rpcs).toHaveLength(0);
+
+    fake.respondRpc("bootstrap_instructor", { data: [{ ok: 1 }] });
+    const allowed = defineMutation(
+      { resource: "instructor", action: "create", subjects: "none" },
+      async (ctx) => ctx.rpc("bootstrap_instructor", { p_full_name: "x" }),
+    );
+    await expect(allowed()).resolves.toEqual({ data: [{ ok: 1 }], error: null });
+    expect(fake.rpcs.map((r) => r.name)).toEqual(["bootstrap_instructor"]);
     expect(fake.queries).toHaveLength(0);
   });
 

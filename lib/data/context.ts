@@ -125,6 +125,26 @@ const NO_SUBJECT_RESOURCES: ReadonlySet<AccessResource> = new Set<AccessResource
   "instructor",
 ]);
 
+/**
+ * The only database calls a `"none"` body can make (#60 re-review). Declaring
+ * `resource: "instructor"` is a label, and a label is not a control: given a
+ * general client, a `"none"` body could read `bride` and log nothing. So it
+ * gets no client — only `ctx.rpc`, checked at runtime against this list, of
+ * functions that run under RLS and return no bride's data.
+ *
+ * Widening this list is a decision about the access log, and should be made
+ * as one: a function that returns bride data does not belong here.
+ */
+export type NoSubjectRpcs = {
+  /** Migration 0002 — the signup seed; returns the caller's own ids. */
+  readonly bootstrap_instructor: Readonly<Record<string, unknown>>;
+};
+const NO_SUBJECT_RPCS: ReadonlySet<string> = new Set<keyof NoSubjectRpcs>([
+  "bootstrap_instructor",
+]);
+
+type RpcResult = { readonly data: unknown; readonly error: { readonly code?: string } | null };
+
 type BaseContext = {
   readonly tenantId: Uuid;
   readonly actor: Actor;
@@ -137,8 +157,12 @@ type BaseContext = {
 };
 
 export type DatabaseLoggedContext = BaseContext;
-export type NoSubjectContext = BaseContext & { readonly db: UserClient };
-export type PerBrideContext = NoSubjectContext & {
+/** No client — `rpc` reaches the `NO_SUBJECT_RPCS` allowlist and nothing else. */
+export type NoSubjectContext = BaseContext & {
+  rpc<K extends keyof NoSubjectRpcs>(name: K, args: NoSubjectRpcs[K]): Promise<RpcResult>;
+};
+export type PerBrideContext = BaseContext & {
+  readonly db: UserClient;
   /** Declares the brides whose data this call disclosed or changed. */
   subject(...brideIds: readonly unknown[]): void;
 };
@@ -283,7 +307,16 @@ function wrap<S extends Subjects, A extends readonly unknown[], R>(
     if (subjects === "database") {
       ctx = base;
     } else if (subjects === "none") {
-      ctx = { ...base, db } satisfies NoSubjectContext;
+      ctx = {
+        ...base,
+        async rpc(name: string, args: Readonly<Record<string, unknown>>): Promise<RpcResult> {
+          if (!NO_SUBJECT_RPCS.has(name)) {
+            throw new AuditViolationError("rpc: not allowed for a subjects \"none\" function.");
+          }
+          const { data, error } = await db.rpc(name, args);
+          return { data, error };
+        },
+      } satisfies NoSubjectContext;
     } else {
       ctx = {
         ...base,

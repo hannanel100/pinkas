@@ -75,7 +75,7 @@ export const bootstrapInstructor = defineMutation(
 
     // Built field by field; the tenant is auth.uid() inside the function and
     // is not a parameter.
-    const { data, error } = await ctx.db.rpc("bootstrap_instructor", {
+    const { data, error } = await ctx.rpc("bootstrap_instructor", {
       p_full_name: fullName,
       p_phone: phone,
       p_templates: templates.map((t) => ({ name: t.name.trim(), body: t.body })),

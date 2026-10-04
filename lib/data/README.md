@@ -20,7 +20,7 @@ Each definition declares its **subjects**:
 | `subjects` | Meaning | Log |
 |---|---|---|
 | `"per-bride"` | the body calls `ctx.subject(brideId)` for every bride it disclosed or changed | one `access_log` row per bride, sharing the call's request id; the wrapper throws if data came back and nobody was subjected |
-| `"none"` | touches no bride data (`ctx.subject` is a type error) | none — the log records access to brides |
+| `"none"` | touches no bride data. The context has **no client**: only `ctx.rpc`, restricted at runtime to `NO_SUBJECT_RPCS` (today `bootstrap_instructor`), and `ctx.subject` is a type error | none — the log records access to brides |
 | `"database"` | may call only the self-logging RPCs (`today_screen`, `read_session_records`); the context has **no client** | written in-database, in the same statement as the read |
 
 `brand.test.ts` imports every module here and fails on any exported function that is not a

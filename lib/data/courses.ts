@@ -20,7 +20,7 @@ import {
   notOk,
   ok,
   type FormResult,
-  type NoSubjectContext,
+  type PerBrideContext,
   type Result,
 } from "./context";
 import {
@@ -214,7 +214,7 @@ type ScheduleCourse = {
 };
 
 async function loadCourse(
-  db: NoSubjectContext["db"],
+  db: PerBrideContext["db"],
   tenantId: Uuid,
   courseId: Uuid,
 ): Promise<ScheduleCourse | null> {
