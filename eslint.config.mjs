@@ -123,6 +123,22 @@ const riskTokenSyntax = [
   },
 ];
 
+/**
+ * Invariant 5 — SUPABASE_SERVICE_ROLE_KEY is in no deployed environment
+ * (ADR-0010 §3), so nothing under app/, lib/ or components/ may name it: as
+ * an identifier (`process.env.SUPABASE_SERVICE_ROLE_KEY`), a string
+ * (`process.env["…"]`) or inside a template. scripts/ is exempt — the staging
+ * harness lives there.
+ */
+const SERVICE_KEY = /SUPABASE_SERVICE_ROLE_KEY/;
+const SERVICE_KEY_MESSAGE =
+  "SUPABASE_SERVICE_ROLE_KEY is in no deployed environment and may not be named under app/, lib/ or components/ (invariant 5, ADR-0010). The portal's credential is PORTAL_DATABASE_URL, read in lib/data/portal.ts only.";
+const serviceKeySyntax = [
+  { selector: `Identifier[name=${SERVICE_KEY.toString()}]`, message: SERVICE_KEY_MESSAGE },
+  { selector: `Literal[value=${SERVICE_KEY.toString()}]`, message: SERVICE_KEY_MESSAGE },
+  { selector: `TemplateElement[value.raw=${SERVICE_KEY.toString()}]`, message: SERVICE_KEY_MESSAGE },
+];
+
 /** Invariant 4 — `today` is injected, never read from the clock. SDD §2.4. */
 const noClockSyntax = [
   {
@@ -153,12 +169,44 @@ const supabaseClientPaths = [
   },
 ];
 
-/** Invariant 5 — the service-role key lives behind lib/data/portal.ts only. */
+/**
+ * Invariant 5 — there is no service-role client (ADR-0010). The portal has its
+ * own database credential, PORTAL_DATABASE_URL, read in lib/data/portal.ts
+ * only, which calls only the portal_* functions. A lib/supabase/service module
+ * would be the old design returning; importing one is an error everywhere.
+ */
 const serviceRolePattern = {
   group: ["@/lib/supabase/service", "**/supabase/service"],
   message:
-    "The service-role client is reachable from lib/data/portal.ts only (invariant 5, SDD §2.3). It must never sit in a path that accepts arbitrary user input.",
+    "There is no service-role client (invariant 5, ADR-0010). The portal reads through PORTAL_DATABASE_URL in lib/data/portal.ts only, which calls only the portal_* functions.",
 };
+
+/**
+ * Invariant 3, one step in — the user-JWT client is imported by
+ * lib/data/context.ts and nothing else. context.ts hands a client only to the
+ * body of defineRead / defineMutation, whose wrappers write the access log, so
+ * a function that does not log cannot obtain a client (#7 design challenge).
+ */
+const userClientPattern = {
+  group: ["@/lib/supabase/user", "**/supabase/user"],
+  message:
+    "Only lib/data/context.ts may import the user-JWT client (invariant 3, SDD §13). Define the access as a defineRead/defineMutation in lib/data/ — that is what writes the access log.",
+};
+
+/**
+ * Data functions are defined inside lib/data/ only. A defineRead in a page
+ * would still log, but it would be a second door — the review surface for
+ * bride-data access is lib/data/, and that is only true if it is the only
+ * place access can be defined.
+ */
+const defineOutsideDataPaths = [
+  {
+    name: "@/lib/data/context",
+    importNames: ["defineRead", "defineMutation"],
+    message:
+      "Data functions are defined in lib/data/ only (invariant 3, SDD §13). Import the function you need from its lib/data/ module.",
+  },
+];
 
 /** Invariant 4 — lib/domain/ imports nothing that does I/O. SDD §2.4. */
 const domainPurityPattern = {
@@ -188,16 +236,18 @@ const portalCannotReachInstructorData = {
     "@/lib/data/sessions",
     "@/lib/data/records",
     "@/lib/data/today",
+    "@/lib/data/instructor",
+    "@/lib/data/context",
     "@/lib/supabase/user",
   ],
   message:
-    "The bride portal is Path 2 (untrusted). It reaches portal_session_view via lib/data/portal.ts and nothing else (invariant 5, SDD §2.3).",
+    "The bride portal is Path 2 (untrusted). It reaches the database through lib/data/portal.ts and nothing else — PORTAL_DATABASE_URL, the portal_* functions only (invariant 5, ADR-0010, SDD §2.3).",
 };
 
 const instructorCannotReachPortalData = {
   group: ["@/lib/data/portal", "**/data/portal"],
   message:
-    "Instructor screens must not import the portal's service-role module (invariant 5, SDD §13).",
+    "Instructor code must not import lib/data/portal.ts — it holds PORTAL_DATABASE_URL and calls only the portal_* functions (invariant 5, ADR-0010, SDD §13).",
 };
 
 /* ── Config ──────────────────────────────────────────────────────────────── */
@@ -219,11 +269,64 @@ const eslintConfig = defineConfig([
     // no-restricted-imports and must therefore repeat these fragments.
     name: "pinkas/baseline-imports",
     files: ["**/*.{ts,tsx,mts}"],
-    ignores: ["lib/supabase/**", "lib/data/portal.ts"],
+    ignores: ["lib/supabase/**", "lib/data/**"],
     rules: {
       "no-restricted-imports": [
         "error",
-        { paths: supabaseClientPaths, patterns: [serviceRolePattern] },
+        {
+          paths: [...supabaseClientPaths, ...defineOutsideDataPaths],
+          patterns: [serviceRolePattern, userClientPattern],
+        },
+      ],
+    },
+  },
+
+  {
+    // The instructor data layer. Instructor modules cannot reach the portal
+    // module (invariant 5), and only context.ts holds the user client.
+    name: "pinkas/data-layer",
+    files: ["lib/data/**/*.ts"],
+    ignores: ["lib/data/portal.ts", "lib/data/context.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: supabaseClientPaths,
+          patterns: [
+            serviceRolePattern,
+            userClientPattern,
+            instructorCannotReachPortalData,
+          ],
+        },
+      ],
+    },
+  },
+  {
+    name: "pinkas/data-context",
+    files: ["lib/data/context.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: supabaseClientPaths,
+          patterns: [serviceRolePattern, instructorCannotReachPortalData],
+        },
+      ],
+    },
+  },
+  {
+    // lib/data/portal.ts (#53/#54) — Path 2. No Supabase client of any kind
+    // and no instructor data module: its only database edge is
+    // PORTAL_DATABASE_URL and the portal_* functions (ADR-0010).
+    name: "pinkas/portal-module",
+    files: ["lib/data/portal.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: supabaseClientPaths,
+          patterns: [serviceRolePattern, portalCannotReachInstructorData],
+        },
       ],
     },
   },
@@ -239,6 +342,7 @@ const eslintConfig = defineConfig([
         ...copySyntax,
         ...colourSyntax,
         ...riskTokenSyntax,
+        ...serviceKeySyntax,
       ],
     },
   },
@@ -253,7 +357,19 @@ const eslintConfig = defineConfig([
         ...rtlSyntax,
         ...copySyntax,
         ...colourSyntax,
+        ...serviceKeySyntax,
       ],
+    },
+  },
+
+  {
+    // The rest of lib/ has no other no-restricted-syntax rule; lib/domain/
+    // composes the same fragment in its own block below.
+    name: "pinkas/lib-syntax",
+    files: ["lib/**/*.{ts,tsx,mts}"],
+    ignores: ["lib/domain/**"],
+    rules: {
+      "no-restricted-syntax": ["error", ...serviceKeySyntax],
     },
   },
 
@@ -261,12 +377,12 @@ const eslintConfig = defineConfig([
     name: "pinkas/domain-is-pure",
     files: ["lib/domain/**/*.ts"],
     rules: {
-      "no-restricted-syntax": ["error", ...noClockSyntax],
+      "no-restricted-syntax": ["error", ...noClockSyntax, ...serviceKeySyntax],
       "no-restricted-imports": [
         "error",
         {
           paths: supabaseClientPaths,
-          patterns: [serviceRolePattern, domainPurityPattern],
+          patterns: [serviceRolePattern, userClientPattern, domainPurityPattern],
         },
       ],
     },
@@ -292,8 +408,12 @@ const eslintConfig = defineConfig([
       "no-restricted-imports": [
         "error",
         {
-          paths: supabaseClientPaths,
-          patterns: [serviceRolePattern, instructorCannotReachPortalData],
+          paths: [...supabaseClientPaths, ...defineOutsideDataPaths],
+          patterns: [
+            serviceRolePattern,
+            userClientPattern,
+            instructorCannotReachPortalData,
+          ],
         },
       ],
     },

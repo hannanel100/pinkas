@@ -1,25 +1,78 @@
 # `lib/data/` — the single door to the database
 
-**Owning agent:** `backend` · **Design:** SDD §13 · **Reviewed by:** `security`
-
-Empty by design; the modules are ticketed.
-
-Expected modules, per SDD §13:
-
-| Module | Responsibility |
-|---|---|
-| `brides.ts` | `listBrides`, `getBrideCard`, `createBride` |
-| `courses.ts` | `createCourse` (snapshot), `recomputeSchedule`, `confirmSchedule` |
-| `sessions.ts` | `markDone`, `cancel`, `reschedule` |
-| `records.ts` | `upsertSessionRecord` — private data, §5 |
-| `today.ts` | `getTodayScreen` — the single aggregated query, §18.1 |
-| `portal.ts` | `resolvePortalToken`, `getPortalView` — Path 2 only, service role |
-| `audit.ts` | `logAccess` — called by every function above |
+**Owning agent:** `backend` · **Design:** SDD §13 · ADR-0006, 0008, 0009, 0010, 0011 · **Reviewed by:** `security`
 
 **Why one place (invariant 3).** PRD §10.1 requires a log of every viewing of bride data. Postgres
 has no `AFTER SELECT`, so no trigger can write it; the log exists only where reads are issued, and
 is *complete* only because reads are issued here. A direct browser-to-Supabase query would be an
-unlogged read.
+unlogged read. (ADR-0009 records where that guarantee stops: a JWT used outside this codebase.)
 
-`portal.ts` is the only module that may import `lib/supabase/service`, and `app/(portal)/` may not
-import any of the others. Both directions are enforced in `eslint.config.mjs`.
+## How the door is built
+
+`context.ts` is the **only** importer of the user-JWT client (`lib/supabase/user.ts`, lint-enforced).
+It exports `defineRead` and `defineMutation` — never the client factory, never a context
+constructor — so the only way to obtain a client is to be the body of one of those, and the wrapper
+writes the access log before the result is returned. Data functions are defined in `lib/data/`
+only: importing `defineRead`/`defineMutation` elsewhere is a lint error.
+
+Each definition declares its **subjects**:
+
+| `subjects` | Meaning | Log |
+|---|---|---|
+| `"per-bride"` | the body calls `ctx.subject(brideId)` for every bride it disclosed or changed | one `access_log` row per bride, sharing the call's request id; the wrapper throws if data came back and nobody was subjected |
+| `"none"` | touches no bride data (`ctx.subject` is a type error) | none — the log records access to brides |
+| `"database"` | may call only the self-logging RPCs (`today_screen`, `read_session_records`); the context has **no client** | written in-database, in the same statement as the read |
+
+`brand.test.ts` imports every module here and fails on any exported function that is not a
+`defineRead`/`defineMutation`, and pins what each one declares. It catches "declared per-bride,
+subjected nobody"; it does not catch "subjected three of the five brides returned" — the
+per-module tests do.
+
+`logAccess` (`audit.ts`) has no free-text slot: closed action/resource unions, uuids only. When
+migration 0009 (#53) revokes `INSERT on access_log` from `authenticated`, its one insert becomes
+`rpc("log_access", …)`.
+
+The actor is a source literal in the resolver. `requireInstructorContext` **refuses** any session
+carrying `impersonated_by` (SDD §16.2); a support resolver exists, requiring that claim plus
+`support_grant_id`, and nothing in Phase 1 uses it yet.
+
+Failures carry no reason (`{ ok: false }`), and database errors carry the SQLSTATE only — a
+Postgres message can quote the row that failed. Credentials travel as `Secret<T>` (`secret.ts`).
+
+## Modules — the public API
+
+| Module | Exports | Logged as |
+|---|---|---|
+| `brides.ts` | `listBrides(filter?)`, `getBrideCard(id)`, `createBride(input)` | `bride`; `bride_card` + `session_record` (same request id) |
+| `courses.ts` | `createCourse(input)` (snapshot), `recomputeSchedule(courseId, options)` (proposal, writes nothing), `confirmSchedule(input)` | `course`; `schedule` |
+| `sessions.ts` | `markDone(id)`, `cancel(id)`, `reschedule(id, target)` | `session` |
+| `records.ts` | `readSessionRecords(ids)`, `upsertSessionRecord(input)` — private data, ADR-0009 | `session_record` (reads in-database) |
+| `today.ts` | `getTodayScreen()` — one RPC; risk via `assessRisk()`, ADR-0008 | `today_screen` (in-database) |
+| `instructor.ts` | `bootstrapInstructor(input)` — the signup transaction, migration 0002 | none (no bride exists) |
+| `context.ts` | `defineRead`, `defineMutation`, `requestPhoneOtp`, `verifyPhoneOtp`, `signOut`, error classes | — |
+| `audit.ts` | `logAccess` — called by the wrappers only | — |
+| `secret.ts` | `Secret<T>`, `secret()` | — |
+
+`internal/` holds pure helpers (ids, phone → E.164, row parsers, the Jerusalem clock, the snapshot
+schema) and the shared records reader; `testing/` holds the test double. Neither can obtain a client.
+
+Rules every module follows: queries carry `tenant_id = ctx.tenantId` as well as being held to it by
+RLS; columns are named, never `*`; money is selected `::text` and travels as a decimal string with
+its currency; phone numbers are E.164 on write; **no insert takes an id from input** — ids are
+generated by the database or server-side, because inserting another tenant's existing id returns
+`23505` and confirms it exists.
+
+## The portal — not here yet
+
+`portal.ts` arrives with **#53** (migration 0008: the `portal_reader` Postgres login, reached
+through Supavisor via `PORTAL_DATABASE_URL`) and **#54** (the `/p#<token>` fragment link and the
+form-POST exchange to `/p/session`). Per ADR-0010 and ADR-0011:
+
+* There is **no service-role client** on the portal path, or anywhere deployed.
+  `SUPABASE_SERVICE_ROLE_KEY` under `app/`, `lib/` or `components/` is a lint error.
+* `portal.ts` reads `PORTAL_DATABASE_URL` — the only module that may — and calls only the
+  `portal_*` functions, which look up by token hash and write their own `('bride_portal', …)`
+  `access_log` rows. It does **not** call `logAccess`.
+* `app/(portal)/` may not import the instructor modules (or `context.ts`), and instructor code may
+  not import `portal.ts`. Both directions are enforced in `eslint.config.mjs`, and `portal.ts` has
+  its own lint block forbidding any Supabase client.
