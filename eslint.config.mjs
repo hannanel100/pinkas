@@ -165,6 +165,27 @@ const portalUrlSyntax = [
   { selector: `TemplateElement[value.raw=${PORTAL_URL.toString()}]`, message: PORTAL_URL_MESSAGE },
 ];
 
+/**
+ * no-restricted-imports does not inspect `import()`, so a dynamic import of
+ * lib/data/context would reach defineRead/defineMutation unseen (#60
+ * re-review). Banned by source text everywhere this fragment is composed —
+ * app/, components/, and lib/ (nothing in lib/data imports it dynamically
+ * either). Static imports of its non-define exports stay legal.
+ */
+const DATA_CONTEXT = /(?:^|\/)data\/context(?:\.[cm]?[jt]s)?$/;
+const dynamicContextSyntax = [
+  {
+    selector: `ImportExpression[source.value=${DATA_CONTEXT.toString()}]`,
+    message:
+      "No dynamic import of lib/data/context (invariant 3, SDD §13): data functions are defined in lib/data/ only.",
+  },
+  {
+    selector: `ImportExpression > TemplateLiteral.source > TemplateElement[value.raw=/data\\/context/]`,
+    message:
+      "No dynamic import of lib/data/context (invariant 3, SDD §13): data functions are defined in lib/data/ only.",
+  },
+];
+
 /** Invariant 4 — `today` is injected, never read from the clock. SDD §2.4. */
 const noClockSyntax = [
   {
@@ -228,7 +249,8 @@ const userClientPattern = {
 const defineOutsidePattern = {
   // A `patterns` entry, not `paths`: `paths` matches the literal specifier
   // only, so `../../../lib/data/context` walked straight past it (#60 review).
-  group: ["@/lib/data/context", "**/data/context"],
+  // `.js` forms too: TypeScript resolves `context.js` to `context.ts`.
+  group: ["@/lib/data/context", "**/data/context", "@/lib/data/context.js", "**/data/context.js"],
   importNames: ["defineRead", "defineMutation"],
   message:
     "Data functions are defined in lib/data/ only (invariant 3, SDD §13). Import the function you need from its lib/data/ module.",
@@ -287,6 +309,9 @@ const instructorCannotReachPortalData = {
   message:
     "Instructor code must not import lib/data/portal.ts — it holds PORTAL_DATABASE_URL and calls only the portal_* functions (invariant 5, ADR-0010, SDD §13).",
 };
+
+const PORTAL_ALLOWLIST_MESSAGE =
+  "The bride portal (Path 2) may import lib/data/portal.ts, lib/domain/, lib/i18n/ and components/ui/ only — never an instructor data module, a client, or anything that re-exports one (invariant 5, ADR-0010, SDD §2.3).";
 
 /* ── Config ──────────────────────────────────────────────────────────────── */
 
@@ -374,12 +399,20 @@ const eslintConfig = defineConfig([
   },
 
   {
-    // Test doubles and the test-only PostgREST client factory (which builds a
-    // client on any JWT it is handed) are reachable from tests only (#60
-    // review). A different rule from no-restricted-imports, and resolved-path
-    // based, so it neither collides with the blocks above nor misses a
-    // relative specifier.
-    name: "pinkas/test-support-is-test-only",
+    // The boundaries that must hold whatever the specifier looks like.
+    // import/no-restricted-paths matches the RESOLVED file, so relative paths,
+    // `.js` extensions and `import()` cannot spell their way past it, and it
+    // is a different rule from no-restricted-imports, so it cannot override
+    // (or be overridden by) the blocks above (#60 review and re-review).
+    //
+    // The portal (Path 2) is an ALLOWLIST, not a denylist: a denylist misses a
+    // re-export through any module nobody thought to ban. app/(portal)/ may
+    // import from lib/ only lib/data/portal.ts, lib/domain/ and lib/i18n/;
+    // from components/ only components/ui/; from app/ only itself and the
+    // shared shell (fonts, globals.css). Those allowed modules are in turn
+    // barred from lib/data/ and lib/supabase/, so the allowlist is closed
+    // under re-export.
+    name: "pinkas/resolved-path-boundaries",
     files: ["**/*.{ts,tsx,mts}"],
     ignores: ["**/*.test.{ts,tsx}", "lib/data/testing/**", "lib/supabase/testing/**"],
     rules: {
@@ -388,10 +421,59 @@ const eslintConfig = defineConfig([
         {
           zones: [
             {
+              // Test doubles and the test-only PostgREST client factory
+              // (which builds a client on any JWT it is handed).
               target: "./",
               from: ["./lib/data/testing", "./lib/supabase/testing"],
               message:
                 "Test support is importable from *.test.ts only — it fakes or bypasses the access log (#60 review).",
+            },
+            {
+              target: "./app/(portal)",
+              from: "./lib",
+              except: ["./data/portal.ts", "./domain", "./i18n"],
+              message: PORTAL_ALLOWLIST_MESSAGE,
+            },
+            {
+              target: "./app/(portal)",
+              from: "./components",
+              except: ["./ui"],
+              message: PORTAL_ALLOWLIST_MESSAGE,
+            },
+            {
+              target: "./app/(portal)",
+              from: "./app",
+              except: ["./(portal)", "./fonts.ts", "./globals.css"],
+              message: PORTAL_ALLOWLIST_MESSAGE,
+            },
+            {
+              // What the portal may import must not itself reach the data
+              // layer — otherwise one re-export reopens the boundary.
+              target: ["./lib/domain", "./lib/i18n", "./components/ui", "./app/fonts.ts"],
+              from: ["./lib/data", "./lib/supabase"],
+              message:
+                "This module is importable by the bride portal, so it may not reach lib/data/ or lib/supabase/ (invariant 5, SDD §2.3).",
+            },
+            {
+              // lib/data/portal.ts: Path 2. Of lib/data/ it may use only the
+              // pure, client-free helpers; nothing from lib/supabase/.
+              target: "./lib/data/portal.ts",
+              from: "./lib/data",
+              except: ["./portal.ts", "./secret.ts", "./internal/ids.ts", "./internal/errors.ts", "./internal/clock.ts"],
+              message: PORTAL_ALLOWLIST_MESSAGE,
+            },
+            {
+              target: "./lib/data/portal.ts",
+              from: "./lib/supabase",
+              message: PORTAL_ALLOWLIST_MESSAGE,
+            },
+            {
+              // And the other direction: nothing but the portal route
+              // reaches portal.ts.
+              target: ["./lib", "./components", "./app/(instructor)", "./app/fonts.ts"],
+              from: "./lib/data/portal.ts",
+              message:
+                "Only app/(portal)/ may import lib/data/portal.ts — it holds PORTAL_DATABASE_URL (invariant 5, ADR-0010, SDD §13).",
             },
           ],
         },
@@ -412,6 +494,7 @@ const eslintConfig = defineConfig([
         ...riskTokenSyntax,
         ...serviceKeySyntax,
         ...portalUrlSyntax,
+        ...dynamicContextSyntax,
       ],
     },
   },
@@ -428,6 +511,7 @@ const eslintConfig = defineConfig([
         ...colourSyntax,
         ...serviceKeySyntax,
         ...portalUrlSyntax,
+        ...dynamicContextSyntax,
       ],
     },
   },
@@ -439,7 +523,12 @@ const eslintConfig = defineConfig([
     files: ["lib/**/*.{ts,tsx,mts}"],
     ignores: ["lib/domain/**", "lib/data/portal.ts"],
     rules: {
-      "no-restricted-syntax": ["error", ...serviceKeySyntax, ...portalUrlSyntax],
+      "no-restricted-syntax": [
+        "error",
+        ...serviceKeySyntax,
+        ...portalUrlSyntax,
+        ...dynamicContextSyntax,
+      ],
     },
   },
   {
@@ -448,7 +537,7 @@ const eslintConfig = defineConfig([
     name: "pinkas/portal-module-syntax",
     files: ["lib/data/portal.ts"],
     rules: {
-      "no-restricted-syntax": ["error", ...serviceKeySyntax],
+      "no-restricted-syntax": ["error", ...serviceKeySyntax, ...dynamicContextSyntax],
     },
   },
 
@@ -461,6 +550,7 @@ const eslintConfig = defineConfig([
         ...noClockSyntax,
         ...serviceKeySyntax,
         ...portalUrlSyntax,
+        ...dynamicContextSyntax,
       ],
       "no-restricted-imports": [
         "error",
