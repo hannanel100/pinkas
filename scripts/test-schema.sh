@@ -134,6 +134,23 @@ if [[ "${SCHEMA_TEST_AS_MIGRATOR:-0}" == "1" ]]; then
   echo "migration role: pinkas_migrator (non-superuser, SCHEMA_TEST_AS_MIGRATOR=1)"
   psql_args+=(-f docs/schema.bootstrap.migrator.sql)
 fi
+# Non-vacuity guard (#53). From 0008 on, the migrations revoke every default
+# privilege the bootstrap emulates, so nothing in the finished database shows
+# whether the emulation ever ran — and without it, "a new table grants
+# nothing to service_role / anon / authenticated" would pass on any plain
+# Postgres. Assert it here, as the migration role, before the first migration.
+psql_args+=(-c "do \$\$ begin
+  if not exists (
+    select 1 from pg_default_acl d, aclexplode(d.defaclacl) a
+    where d.defaclrole = current_user::regrole
+      and d.defaclnamespace = 'public'::regnamespace
+      and d.defaclobjtype = 'r'
+      and a.grantee = 'service_role'::regrole
+      and a.privilege_type = 'SELECT')
+  then
+    raise exception 'FAIL: the bootstrap does not emulate Supabase''s default privileges for the migration role';
+  end if;
+end \$\$")
 for path in "${migrations[@]}"; do
   psql_args+=(-f "$path")
 done

@@ -9,9 +9,13 @@
  *
  * Modes (PINKAS_LIVE_TEST):
  *   staging         Full suite. Creates two throwaway auth users, seeds the
- *                   docs/schema.test.sql fixtures via the service key, runs
- *                   the assertions with real JWTs, then deletes everything it
- *                   created. Writes data: staging only, never production.
+ *                   docs/schema.test.sql fixtures through each tenant's own
+ *                   JWT, runs the assertions with real JWTs, then deletes
+ *                   everything it created except its access_log rows. The
+ *                   service key is used for auth.admin (createUser /
+ *                   deleteUser) ONLY: since migration 0008 (#53, ADR-0010)
+ *                   it holds no privilege in `public`, which this mode also
+ *                   asserts. Writes data: staging only, never production.
  *   prod-anon-only  Read-only. Asserts the anon key without a JWT reads zero
  *                   rows from every table and view. Needs no service key and
  *                   is safe against production.
@@ -20,15 +24,19 @@
  * see docs/runbooks/provisioning.md):
  *   LIVE_SUPABASE_URL
  *   LIVE_SUPABASE_ANON_KEY
- *   LIVE_SUPABASE_SERVICE_ROLE_KEY   staging mode only
+ *   LIVE_SUPABASE_SERVICE_ROLE_KEY   staging mode only, auth.admin only — the
+ *                                    staging key; no deployed environment
+ *                                    holds any service key (ADR-0010 §3)
  *
  * Two schema.test.sql assertions cannot be expressed through PostgREST and
  * remain covered only by the CI bootstrap run — called out here rather than
  * quietly dropped:
  *   1. The information_schema check that the private fields (private_note,
  *      needs_review_note, covered_topic_ids) exist in exactly one relation.
- *      Approximated below by asserting the portal_session_view response shape
- *      is exactly the seven public columns — a weaker, surface-level check.
+ *      Since 0008 the portal views are not readable through PostgREST at all;
+ *      portal_session_view's seven-column surface, and the portal_reader
+ *      login's containment, are asserted live by scripts/verify-live-schema.sh
+ *      step 4 over a direct database connection instead.
  *   2. Distinguishing SQLSTATE insufficient_privilege from an RLS WITH CHECK
  *      violation: PostgREST surfaces both as error code 42501.
  */
@@ -123,13 +131,31 @@ async function createUser(admin, email, password) {
   return data.user;
 }
 
-async function seed(admin, table, rows) {
-  const { error } = await admin.from(table).insert(rows);
-  if (error) throw new Error(`seed ${table}: ${error.message}`);
+async function seed(client, table, rows) {
+  const { error } = await client.from(table).insert(rows);
+  if (error) throw new Error(`seed ${table}: ${error.code ?? ""} ${error.message}`);
+}
+
+async function signIn(email, password) {
+  const client = anonClient();
+  const { error } = await client.auth.signInWithPassword({ email, password });
+  if (error) throw new Error(`sign-in ${email} failed: ${error.message}`);
+  return client;
+}
+
+// A PostgREST call refused by privilege. Since 0008 (#53) the service key
+// holds nothing in `public`, and the portal objects are reachable by the
+// portal_reader database login only — never through PostgREST.
+function refused(res) {
+  return !!res.error && (res.data ?? null) === null;
 }
 
 async function fullSuite() {
   const serviceKey = required("LIVE_SUPABASE_SERVICE_ROLE_KEY");
+  // auth.admin ONLY (createUser / deleteUser). Since migration 0008 the
+  // service key holds no privilege in `public`, so it cannot seed; each
+  // tenant seeds its own rows through its own JWT, under the same grants and
+  // policies the product uses.
   const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
 
   const runTag = Date.now();
@@ -144,6 +170,7 @@ async function fullSuite() {
   console.log("\n== creating throwaway auth users (real auth.uid values) ==");
   const A = (await createUser(admin, emailA, password)).id;
   const B = (await createUser(admin, emailB, password)).id;
+  const signedIn = {};
 
   const ids = {
     brideA: randomUUID(),
@@ -165,59 +192,91 @@ async function fullSuite() {
   };
 
   try {
-    console.log("== seeding the schema.test.sql fixtures via the service key ==");
-    await seed(admin, "instructor", [
-      { id: A, full_name: "Michal (tenant A)", phone: "050-0000001" },
-      { id: B, full_name: "Sara  (tenant B)", phone: "050-0000002" },
-    ]);
-    await seed(admin, "bride", [
+    console.log("== signing in as tenants A and B (real verified JWTs) ==");
+    const a = await signIn(emailA, password);
+    signedIn[A] = a;
+    const b = await signIn(emailB, password);
+    signedIn[B] = b;
+    const { data: userData, error: userErr } = await a.auth.getUser();
+    check(!userErr && userData?.user?.id === A, "JWT sub resolves to the created auth user (auth.uid source)");
+
+    console.log("== seeding the schema.test.sql fixtures, each tenant through its own JWT ==");
+    await seed(a, "instructor", [{ id: A, full_name: "Michal (tenant A)", phone: "050-0000001" }]);
+    await seed(b, "instructor", [{ id: B, full_name: "Sara  (tenant B)", phone: "050-0000002" }]);
+    await seed(a, "bride", [
       { id: ids.brideA, tenant_id: A, first_name: "Noa", wedding_date: dateFromToday(34), status: "active" },
-      { id: ids.brideB, tenant_id: B, first_name: "Rivka", wedding_date: dateFromToday(60), status: "active" },
       { id: ids.brideCrit, tenant_id: A, first_name: "Crit", wedding_date: dateFromToday(28), status: "active" },
       { id: ids.brideHigh, tenant_id: A, first_name: "High", wedding_date: dateFromToday(214), status: "active" },
       { id: ids.brideMed, tenant_id: A, first_name: "Med", wedding_date: dateFromToday(214), status: "active" },
       { id: ids.brideInfo, tenant_id: A, first_name: "Info", wedding_date: dateFromToday(20), status: "active" },
       { id: ids.brideNone, tenant_id: A, first_name: "None", wedding_date: dateFromToday(214), status: "active" },
     ]);
-    await seed(admin, "course", [
+    await seed(b, "bride", [
+      { id: ids.brideB, tenant_id: B, first_name: "Rivka", wedding_date: dateFromToday(60), status: "active" },
+    ]);
+    await seed(a, "course", [
       { id: ids.courseA, tenant_id: A, bride_id: ids.brideA, curriculum_snapshot: { topics: [] }, target_end_date: dateFromToday(20), status: "active" },
-      { id: ids.courseB, tenant_id: B, bride_id: ids.brideB, curriculum_snapshot: { topics: [] }, target_end_date: dateFromToday(46), status: "active" },
       { id: ids.courseCrit, tenant_id: A, bride_id: ids.brideCrit, curriculum_snapshot: {}, target_end_date: dateFromToday(14), status: "active" },
       { id: ids.courseHigh, tenant_id: A, bride_id: ids.brideHigh, curriculum_snapshot: {}, target_end_date: dateFromToday(200), status: "active" },
       { id: ids.courseMed, tenant_id: A, bride_id: ids.brideMed, curriculum_snapshot: {}, target_end_date: dateFromToday(200), status: "active" },
       { id: ids.courseInfo, tenant_id: A, bride_id: ids.brideInfo, curriculum_snapshot: {}, target_end_date: dateFromToday(6), status: "active" },
       { id: ids.courseNone, tenant_id: A, bride_id: ids.brideNone, curriculum_snapshot: {}, target_end_date: dateFromToday(200), status: "active" },
     ]);
-    const sessions = [
-      { id: ids.sessionA, tenant_id: A, course_id: ids.courseA, order_index: 1, scheduled_at: tsFromNow(1), location: "Herzl 14", status: "planned" },
-      { id: ids.sessionB, tenant_id: B, course_id: ids.courseB, order_index: 1, scheduled_at: tsFromNow(2), location: "Weizmann 3", status: "planned" },
-    ];
+    await seed(b, "course", [
+      { id: ids.courseB, tenant_id: B, bride_id: ids.brideB, curriculum_snapshot: { topics: [] }, target_end_date: dateFromToday(46), status: "active" },
+    ]);
     // Every row needs an explicit id: PostgREST unifies columns across a bulk
     // insert, so rows missing a key get an explicit null instead of the default.
+    const sessionsA = [
+      { id: ids.sessionA, tenant_id: A, course_id: ids.courseA, order_index: 1, scheduled_at: tsFromNow(1), location: "Herzl 14", status: "planned" },
+    ];
     for (let g = 1; g <= 5; g += 1) {
-      sessions.push({ id: randomUUID(), tenant_id: A, course_id: ids.courseCrit, order_index: g, scheduled_at: tsFromNow(g), status: "planned" });
+      sessionsA.push({ id: randomUUID(), tenant_id: A, course_id: ids.courseCrit, order_index: g, scheduled_at: tsFromNow(g), location: null, status: "planned" });
     }
-    sessions.push(
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 1, scheduled_at: tsFromNow(-10), status: "cancelled" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 1, scheduled_at: tsFromNow(-30), status: "done" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseInfo, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 1, scheduled_at: tsFromNow(-2), status: "done" },
-      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 2, scheduled_at: tsFromNow(3), status: "planned" },
+    sessionsA.push(
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 1, scheduled_at: tsFromNow(-10), location: null, status: "cancelled" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseHigh, order_index: 2, scheduled_at: tsFromNow(3), location: null, status: "planned" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 1, scheduled_at: tsFromNow(-30), location: null, status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseMed, order_index: 2, scheduled_at: tsFromNow(3), location: null, status: "planned" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseInfo, order_index: 1, scheduled_at: tsFromNow(-2), location: null, status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 1, scheduled_at: tsFromNow(-2), location: null, status: "done" },
+      { id: randomUUID(), tenant_id: A, course_id: ids.courseNone, order_index: 2, scheduled_at: tsFromNow(3), location: null, status: "planned" },
     );
-    await seed(admin, "session", sessions);
-    await seed(admin, "session_record", [
-      { session_id: ids.sessionA, tenant_id: A, private_note: "A private note", needs_review_note: "A review note" },
-      { session_id: ids.sessionB, tenant_id: B, private_note: "B private note", needs_review_note: "B review note" },
+    await seed(a, "session", sessionsA);
+    await seed(b, "session", [
+      { id: ids.sessionB, tenant_id: B, course_id: ids.courseB, order_index: 1, scheduled_at: tsFromNow(2), location: "Weizmann 3", status: "planned" },
     ]);
+    // session_record's write path is the upsert function (0006), not the table.
+    for (const [client, sessionId, who] of [[a, ids.sessionA, "A"], [b, ids.sessionB, "B"]]) {
+      const { error } = await client.rpc("upsert_session_record", {
+        p_session_id: sessionId,
+        p_covered_topic_ids: [],
+        p_private_note: `${who} private note`,
+        p_needs_review_note: `${who} review note`,
+      });
+      if (error) throw new Error(`seed session_record ${who}: ${error.code ?? ""} ${error.message}`);
+    }
 
-    console.log("== signing in as tenant A (real verified JWT) ==");
-    const a = anonClient();
-    const { error: signInErr } = await a.auth.signInWithPassword({ email: emailA, password });
-    if (signInErr) throw new Error(`sign-in failed: ${signInErr.message}`);
-    const { data: userData, error: userErr } = await a.auth.getUser();
-    check(!userErr && userData?.user?.id === A, "JWT sub resolves to the created auth user (auth.uid source)");
+    console.log("\n== the service key holds nothing in public (0008, ADR-0010) ==");
+    for (const rel of ["bride", "course", "session", "session_record", "payment", "access_log", "portal_session_view", "instructor"]) {
+      const res = await admin.from(rel).select("*").limit(1);
+      check(
+        refused(res) && res.error.code === "42501",
+        `service key: ${rel} refused (42501)`,
+        res.error ? `${res.error.code} ${res.error.message}` : `read ${res.data?.length} row(s)`,
+      );
+    }
+    {
+      const res = await admin.from("bride").insert({ tenant_id: A, first_name: "ServiceKeyWrite" }).select("id");
+      check(refused(res), "service key: insert into bride refused", res.error ? "" : `inserted ${res.data?.length}`);
+    }
+    for (const [who, client] of [["service key", admin], ["instructor JWT", a]]) {
+      const res = await client.rpc("portal_resolve_token", {
+        p_token_hash: "\\x" + "00".repeat(32),
+        p_request_id: randomUUID(),
+      });
+      check(refused(res), `${who}: portal_resolve_token not callable through PostgREST`, res.error ? "" : "call succeeded");
+    }
 
     console.log("\n== tenant isolation, view invocation, write-side checks ==");
     {
@@ -257,8 +316,9 @@ async function fullSuite() {
       check(!error && data?.length === 6, "v_course_risk respects caller RLS (security_invoker)", error?.message ?? `got ${data?.length}`);
     }
     {
-      const { data, error } = await a.from("portal_session_view").select("id").eq("bride_id", ids.brideB);
-      check(!error && data?.length === 0, "portal_session_view leaks no tenant B rows");
+      // 0008: the portal views have no direct reader but portal_owner.
+      const res = await a.from("portal_session_view").select("id").eq("bride_id", ids.brideB);
+      check(refused(res) && res.error.code === "42501", "portal_session_view is refused to an instructor JWT (0008)", res.error ? `${res.error.code}` : `read ${res.data?.length} row(s)`);
     }
     {
       const { error } = await a.from("bride").insert({ tenant_id: B, first_name: "Injected" });
@@ -290,6 +350,53 @@ async function fullSuite() {
       }
     }
 
+    console.log("\n== Prefer: tx=rollback must not apply (db-tx-end, ADR-0010 §5) ==");
+    {
+      // If PostgREST honoured tx=rollback, a caller would receive the rows of
+      // read_session_records while its access_log row rolled back. Supabase is
+      // expected to run PostgREST's default db-tx-end = commit, which ignores
+      // the preference (lenient) or rejects it (handling=strict, PGRST122).
+      const { data: sess } = await a.auth.getSession();
+      const token = sess?.session?.access_token;
+      const call = async (prefer, requestId) =>
+        fetch(`${url}/rest/v1/rpc/read_session_records`, {
+          method: "POST",
+          headers: {
+            apikey: anonKey,
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Prefer: prefer,
+          },
+          body: JSON.stringify({ p_session_ids: [ids.sessionA], p_request_id: requestId }),
+        });
+      const countLog = async (requestId) => {
+        const { data, error } = await a.from("access_log").select("id").eq("request_id", requestId);
+        return error ? `error ${error.message}` : data.length;
+      };
+
+      const strictId = randomUUID();
+      const strict = await call("tx=rollback, handling=strict", strictId);
+      const strictBody = await strict.text();
+      const strictApplied = (strict.headers.get("preference-applied") ?? "").includes("tx=rollback");
+      const strictLog = await countLog(strictId);
+      check(
+        !strictApplied && (strict.status === 400 ? strictLog === 0 : strictLog === 1),
+        "strict: tx=rollback is refused or not applied, and the log matches what was returned",
+        `status ${strict.status}, applied=${strictApplied}, log rows ${strictLog}, body ${strictBody.slice(0, 120)}`,
+      );
+
+      const lenientId = randomUUID();
+      const lenient = await call("tx=rollback", lenientId);
+      const lenientRows = lenient.ok ? (await lenient.json()).length : -1;
+      const lenientApplied = (lenient.headers.get("preference-applied") ?? "").includes("tx=rollback");
+      const lenientLog = await countLog(lenientId);
+      check(
+        lenient.ok && lenientRows === 1 && !lenientApplied && lenientLog === 1,
+        "lenient: rows returned under tx=rollback are still logged (exactly one access_log row)",
+        `status ${lenient.status}, rows ${lenientRows}, applied=${lenientApplied}, log rows ${lenientLog}`,
+      );
+    }
+
     console.log("\n== risk tiers ==");
     const want = new Map([
       [ids.courseCrit, ["critical", "wont_finish_in_time"]],
@@ -309,38 +416,31 @@ async function fullSuite() {
       const wanted = `${level}/${reason ?? "-"}`;
       check(got === wanted, `risk tier ${wanted}`, `got ${got}`);
     }
-
-    console.log("\n== portal surface (response-shape approximation) ==");
-    {
-      const { data, error } = await a.from("portal_session_view").select("*").eq("bride_id", ids.brideA);
-      const expected = ["bride_id", "duration_minutes", "id", "location", "order_index", "scheduled_at", "status"];
-      const got = data?.length ? Object.keys(data[0]).sort() : [];
-      check(
-        !error && data?.length === 1 && JSON.stringify(got) === JSON.stringify(expected),
-        "portal_session_view exposes exactly the seven public columns",
-        error?.message ?? `got [${got.join(", ")}]`,
-      );
-    }
   } finally {
     console.log("\n== cleanup ==");
-    await cleanup(admin, [A, B], runRequestId);
+    await cleanup(admin, signedIn, [A, B], runRequestId);
   }
 }
 
-async function cleanup(admin, tenantIds, runRequestId) {
-  const del = async (table, column) => {
-    const { error } = await admin.from(table).delete().in(column, tenantIds);
-    if (error) {
-      console.error(`cleanup ${table}: ${error.message} — remove rows for tenants ${tenantIds.join(", ")} manually`);
+async function cleanup(admin, signedIn, tenantIds, runRequestId) {
+  // Each tenant deletes her own instructor row through her own JWT; that
+  // cascades through every tenant-scoped FK (cascades run as the table owner,
+  // not under the caller's privileges). access_log has no FK and is
+  // deliberately LEFT BEHIND: nobody — instructor, service key or portal —
+  // can delete from it, and the log is designed to outlive the data it
+  // describes. Staging holds fake data only; the rows are identifiable by the
+  // tenant ids and the run's request id printed here.
+  for (const id of tenantIds) {
+    const client = signedIn[id];
+    if (!client) {
+      console.error(`cleanup: tenant ${id} never signed in — remove its rows manually (dashboard, as postgres)`);
+      continue;
     }
-  };
-  // Deleting instructors cascades through every tenant-scoped FK. access_log
-  // has no FK and is deliberately LEFT BEHIND: since migration 0005 the
-  // service key holds no DELETE on it (a BYPASSRLS key that could erase the
-  // audit trail would defeat it), and the log is designed to outlive the
-  // data it describes. Staging holds fake data only; the rows are
-  // identifiable by the tenant ids and the run's request id printed here.
-  await del("instructor", "id");
+    const { error } = await client.from("instructor").delete().eq("id", id);
+    if (error) {
+      console.error(`cleanup instructor ${id}: ${error.message} — remove its rows manually (dashboard, as postgres)`);
+    }
+  }
   console.log(
     `access_log rows from this run are kept: tenant_id in (${tenantIds.join(", ")}), ` +
       `harness-written rows carry request_id ${runRequestId}`,
