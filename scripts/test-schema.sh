@@ -158,4 +158,52 @@ psql_args+=(-c "reset role" -f docs/schema.test.sql)
 
 psql "${psql_args[@]}"
 
+# --------------------------------------------------------------------------
+# Negative scenario (security review of #61): 0008 must REFUSE to adopt a
+# pre-existing portal_owner / portal_reader that has a member — e.g. one an
+# operator granted to `authenticated`, through which a tenant would read
+# every tenant's brides via the `to portal_owner` policies. The suite above
+# can only see the state after a successful apply, so this applies the
+# migrations again into a scratch database on the same server (roles are
+# cluster-wide, so the portal roles already exist), grants the role to
+# `authenticated`, and expects 0008 to fail with the refusal. Applied as the
+# connecting role in both modes; the guard does not depend on which.
+# --------------------------------------------------------------------------
+adopt_db="pinkas_adopt53"
+pre_0008=()
+mig_0008=""
+for path in "${migrations[@]}"; do
+  name="${path##*/}"
+  if [[ "$name" == 0008_* ]]; then mig_0008="$path"; break; fi
+  pre_0008+=(-f "$path")
+done
+if [[ -n "$mig_0008" ]]; then
+  adopt_cleanup() {
+    psql -d "$DB_URL" -q -X \
+      -c "revoke portal_owner from authenticated" \
+      -c "revoke portal_reader from authenticated" \
+      -c "drop database if exists $adopt_db" >/dev/null 2>&1 || true
+  }
+  for portal in portal_owner portal_reader; do
+    adopt_cleanup
+    psql -d "$DB_URL" -q -X -v ON_ERROR_STOP=1 -c "create database $adopt_db" >/dev/null
+    if out=$(psql -d "$DB_URL" -X -v ON_ERROR_STOP=1 -c "\\c $adopt_db" \
+                -f docs/schema.bootstrap.sql "${pre_0008[@]}" \
+                -c "grant $portal to authenticated" \
+                -f "$mig_0008" 2>&1); then
+      adopt_cleanup
+      echo "FAIL: 0008 adopted a pre-existing $portal that has a member (authenticated)" >&2
+      exit 1
+    fi
+    if [[ "$out" != *"$portal exists and has members"* ]]; then
+      adopt_cleanup
+      printf '%s\n' "$out" | tail -5 >&2
+      echo "FAIL: 0008 failed, but not with the adoption refusal for $portal" >&2
+      exit 1
+    fi
+    echo "PASS: 0008 refuses to adopt a $portal that has a member"
+  done
+  adopt_cleanup
+fi
+
 echo "schema suite passed"

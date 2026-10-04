@@ -2301,13 +2301,21 @@ begin
              where m.member in ('portal_owner'::regrole, 'portal_reader'::regrole)) then
     raise exception 'FAIL: a portal role is a member of another role';
   end if;
-  -- and nobody but the migration role may become portal_owner
-  if exists (select 1 from pg_auth_members m
-             join pg_roles g on g.oid = m.member
-             where m.roleid = 'portal_owner'::regrole
-               and g.rolname in ('anon', 'authenticated', 'service_role', 'portal_reader',
-                                 'session_record_reader')) then
-    raise exception 'FAIL: an API or portal role can SET ROLE portal_owner';
+  -- and nobody but the migration role (or a superuser) is a member of
+  -- either, directly or through another role: a member of portal_owner reads
+  -- every live bride's portal columns through its policies (security review
+  -- of #61). pg_has_role(..., 'MEMBER') follows indirect membership.
+  if exists (select 1 from pg_roles g, (values ('portal_owner'), ('portal_reader')) t(portal)
+             where pg_has_role(g.oid, t.portal::regrole, 'MEMBER')
+               and g.rolname <> t.portal
+               and not g.rolsuper
+               and g.oid <> (select relowner from pg_class where oid = 'public.bride'::regclass)) then
+    raise exception 'FAIL: a role other than the migration role is a member of portal_owner or portal_reader: %',
+      (select string_agg(g.rolname || ' in ' || t.portal, ', ')
+       from pg_roles g, (values ('portal_owner'), ('portal_reader')) t(portal)
+       where pg_has_role(g.oid, t.portal::regrole, 'MEMBER') and g.rolname <> t.portal
+         and not g.rolsuper
+         and g.oid <> (select relowner from pg_class where oid = 'public.bride'::regclass));
   end if;
   if exists (select 1 from pg_class c where c.relowner in ('portal_owner'::regrole, 'portal_reader'::regrole)) then
     raise exception 'FAIL: a portal role owns a relation (RLS would not apply to it)';
@@ -2336,8 +2344,12 @@ begin
       raise exception 'FAIL: % is owned by %, expected portal_owner (never a BYPASSRLS role)', f.sig, f.owner;
     end if;
     if f.provolatile <> 'v' then raise exception 'FAIL: % is not VOLATILE (it writes)', f.sig; end if;
-    if f.proconfig is null or not ('search_path=""' = any (f.proconfig)) then
-      raise exception 'FAIL: % does not set search_path = ''''', f.sig;
+    -- pg_temp named LAST: with search_path = '' Postgres still searches
+    -- pg_temp first for types and relations, which let portal_reader's temp
+    -- domains run code as portal_owner (security review of #61). The
+    -- behavioural regression test is at the end of this section.
+    if f.proconfig is null or not ('search_path=pg_catalog, pg_temp' = any (f.proconfig)) then
+      raise exception 'FAIL: % does not set search_path = pg_catalog, pg_temp (got %)', f.sig, f.proconfig;
     end if;
     -- EXECUTE: portal_reader and the owner, nobody else, PUBLIC included
     select string_agg(distinct case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end, ',')
@@ -2745,6 +2757,49 @@ begin
   raise notice 'PASS: portal_session_view (security_invoker) still applies the caller''s RLS';
 end $$;
 rollback;
+-- ---------- search_path: temp objects cannot hijack the definer functions ----------
+-- Security review of #61 (CRITICAL). portal_reader holds TEMP on the database
+-- through PUBLIC, and pg_temp is searched for type and relation names even
+-- when it is not listed — FIRST, unless search_path names it explicitly
+-- later. With `search_path = ''` a temp domain named `text` or `timestamptz`
+-- whose CHECK calls temp code made that code run as portal_owner. The fix is
+-- `search_path = pg_catalog, pg_temp` and schema-qualified types throughout.
+-- Here portal_reader plants a temp domain over every type name the functions
+-- could resolve at run time, each CHECK raising if it ever runs, and calls
+-- all three functions. Everything is rolled back.
+begin;
+set local role portal_reader;
+create function pg_temp.c53_evil() returns pg_catalog.bool language plpgsql as
+  $evil$ begin raise exception 'FAIL: temp code ran inside a portal function as %', current_user; end $evil$;
+create domain pg_temp.text        as pg_catalog.text        check (pg_temp.c53_evil());
+create domain pg_temp.timestamptz as pg_catalog.timestamptz check (pg_temp.c53_evil());
+create domain pg_temp.uuid        as pg_catalog.uuid        check (pg_temp.c53_evil());
+create domain pg_temp.bytea       as pg_catalog.bytea       check (pg_temp.c53_evil());
+create domain pg_temp.int4        as pg_catalog.int4        check (pg_temp.c53_evil());
+create domain pg_temp.int8        as pg_catalog.int8        check (pg_temp.c53_evil());
+create domain pg_temp.interval    as pg_catalog.interval    check (pg_temp.c53_evil());
+create domain pg_temp.jsonb       as pg_catalog.jsonb       check (pg_temp.c53_evil());
+-- a temp relation shadowing the base tables and views by name
+create temp table bride (id pg_catalog.uuid);
+create temp table access_log (id pg_catalog.int8);
+create temp table portal_bride_view (id pg_catalog.uuid);
+create temp table portal_rate_limit (hits pg_catalog.int4);
+select pg_catalog.count(*) as c53_resolved
+from public.portal_resolve_token(pg_catalog.sha256('tok-37-live'::pg_catalog.bytea),
+                                 '53000000-0000-4000-8000-000000000101') \gset
+select pg_catalog.count(*) as c53_sessions
+from public.portal_sessions(pg_catalog.sha256('tok-37-live'::pg_catalog.bytea),
+                            '53000000-0000-4000-8000-000000000102') \gset
+select r.ip_hits is null and r.token_hash_prefix_hits = 1 as c53_hit_ok
+from public.portal_rate_limit_hit(null, '\x0102030405060708'::pg_catalog.bytea, 60) r \gset
+rollback;
+select (:c53_resolved = 1 and :c53_sessions = 2 and :'c53_hit_ok'::pg_catalog.bool) as c53_ok \gset
+\if :c53_ok
+\echo 'PASS: temp domains and temp tables planted by portal_reader do not reach the portal functions'
+\else
+\echo 'resolved=' :c53_resolved ' sessions=' :c53_sessions ' hit_ok=' :c53_hit_ok
+do $$ begin raise exception 'FAIL: portal functions misbehaved under planted temp objects (see the line above)'; end $$;
+\endif
 -- =============================================================
 -- END #53
 -- =============================================================

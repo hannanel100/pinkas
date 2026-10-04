@@ -38,22 +38,55 @@
 --      * Created NOLOGIN here. LOGIN and its password are set OUT OF BAND
 --        by the operator (infra, #56), so no credential is ever in git:
 --          alter role portal_reader with login password '<generated>';
---      * NOBYPASSRLS, NOINHERIT, not a superuser, member of nothing.
+--      * NOBYPASSRLS, NOINHERIT, not a superuser, member of nothing, and
+--        nobody but the migration role (or a superuser) is a member of it.
 --      * connection limit 20; statement_timeout 2s (role-level, so it
---        applies to every Supavisor backend opened for it).
+--        applies to every Supavisor backend opened for it). The timeout is
+--        a DEFAULT, not a control: any role may `set statement_timeout` in
+--        its own session, portal_reader included. It protects against a
+--        slow query in portal.ts, not against a hostile holder of the
+--        credential.
 --      * Privileges: USAGE on schema public and EXECUTE on exactly three
 --        functions. No table, view, sequence or column privilege anywhere.
+--      * It still holds TEMP on the database, through PUBLIC (a Postgres
+--        default). That cannot be revoked from one role without revoking it
+--        from PUBLIC — a database-wide change to a platform default that
+--        this migration does not make. It is therefore neutralised where it
+--        mattered instead: see SEARCH PATH under 3. (Under Supavisor's
+--        transaction pooling a temp object can outlive the client that made
+--        it and sit in a backend the next portal request reuses; that is
+--        harmless only because no function here resolves a name through
+--        pg_temp.)
 --
 -- 2. portal_owner — owns the three functions (the 0006 pattern).
 --      * NOLOGIN, NOBYPASSRLS, not a superuser, member of nothing, owner of
---        no table. RLS therefore applies to it like to any other role, and
+--        no table, and nobody but the migration role (which hands the
+--        functions over to it) or a superuser is a member of it: a member
+--        of portal_owner reaches every live bride's portal columns through
+--        the `to portal_owner` policies below. A pre-existing portal_owner
+--        or portal_reader with any other member is refused, not adopted
+--        (security review of #61). RLS therefore applies to it like to any other role, and
 --        it reaches rows only through the policies below, written
 --        `to portal_owner` so they mean nothing for anyone else.
 --      * Column grants: exactly what the two portal views read, plus the
 --        rate-limit counter, plus INSERT on access_log.
 --
--- 3. The functions. SECURITY DEFINER, `set search_path = ''`, every name
---    schema-qualified.
+-- 3. The functions. SECURITY DEFINER, `set search_path = pg_catalog, pg_temp`,
+--    every relation, type and function name schema-qualified.
+--
+--    SEARCH PATH (security review of #61, CRITICAL, fixed here before merge).
+--    The first draft used `search_path = ''`. Postgres then STILL searches
+--    pg_temp for relation and type names — first. portal_reader can create
+--    temp objects (TEMP via PUBLIC, above), so a temp domain named `text` or
+--    `timestamptz` whose CHECK called temp code made that code run as
+--    portal_owner on any call, with no valid hash: it read every tenant's
+--    live brides and wrote forged log rows. Naming pg_temp LAST puts it
+--    after pg_catalog, so a built-in type or relation name can never be
+--    shadowed; pg_temp is never searched for functions or operators at all.
+--    Qualifying every type (`pg_catalog.text`, `pg_catalog.timestamptz`, …)
+--    and relation (`public.…`) is the second layer. schema.test.sql's #53
+--    section plants temp domains and tables over every name these functions
+--    use and calls all three.
 --
 --    portal_resolve_token(p_token_hash bytea, p_request_id uuid)
 --      -> table (bride_id uuid, tenant_id uuid, first_name text,
@@ -77,13 +110,22 @@
 --        resolved one writes exactly one row whether or not she has
 --        sessions. The actor is a constant here, never a parameter. The
 --        portal route therefore does NOT call logAccess (ADR-0010 §2).
---      * Call from the portal's driver as a plain SELECT; never wrap it in
---        a transaction the caller rolls back — the log row would go with it.
+--      * The log is complete for any caller that COMMITS — not "by
+--        construction" for every caller. Over the wire protocol the caller
+--        owns the transaction: `begin; select … portal_sessions(…); rollback;`
+--        returns the rows and discards the log row (security review of #61).
+--        That needs both PORTAL_DATABASE_URL and a valid token hash. The rule
+--        for lib/data/portal.ts: call each function as a plain autocommit
+--        SELECT; never wrap a portal call in a transaction, and never one
+--        that is rolled back.
 --
 --    portal_rate_limit_hit(bytea, bytea, integer)
 --      * Interface unchanged from 0007. Becomes SECURITY DEFINER owned by
---        portal_owner, with qualified names and an empty search_path, so
---        the caller needs no privilege on the table.
+--        portal_owner, with qualified names and the same search_path as
+--        above, so the caller needs no privilege on the table. (0007's
+--        `public, pg_temp` was harmless for an invoker-rights function, whose
+--        temp code would run as the caller anyway; under definer rights it
+--        is exactly what must not be inherited.)
 --    portal_rate_limit_prune()
 --      * Unchanged and executable by nobody but its owner: the pg_cron job
 --        runs as the migration role (`postgres` on Supabase), which owns
@@ -96,7 +138,8 @@
 --                 shows. These are not tenant-scoped, on purpose: the only
 --                 row filter on the portal path is the token hash, applied
 --                 inside the functions, and portal_owner cannot be reached
---                 except through them (NOLOGIN, member of nothing).
+--                 except through them (NOLOGIN, no member but the migration
+--                 role).
 --      * portal_rate_limit: all rows (not tenant data; 0007).
 --      * access_log: INSERT only, and only a row that is
 --                 ('bride_portal', actor_id = bride_id) for a bride whose
@@ -130,9 +173,13 @@
 -- return what is stated, or stop and take it back to `database`):
 --
 --   -- 1. Neither role exists yet (roles are cluster-wide). Expect 0 rows.
---   --    If one exists, the migration will refuse it unless it is NOLOGIN/
---   --    NOBYPASSRLS/NOSUPERUSER and member of nothing, and the migration
---   --    role holds ADMIN on it (check 2).
+--   --    If one exists, the migration will refuse it unless it is
+--   --    NOBYPASSRLS/NOSUPERUSER (portal_owner also NOLOGIN), member of
+--   --    nothing, has no member but the migration role or a superuser, and
+--   --    the migration role holds ADMIN on it. To see who is a member:
+--   --      select roleid::regrole, member::regrole from pg_auth_members
+--   --       where roleid in (select oid from pg_roles
+--   --                        where rolname in ('portal_owner','portal_reader'));
 --   select rolname from pg_roles where rolname in ('portal_owner', 'portal_reader');
 --
 --   -- 2. The migration role can create roles. Expect `t`.
@@ -175,6 +222,18 @@ begin
         nm, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolcanlogin;
     elsif exists (select 1 from pg_auth_members m where m.member = r.oid) then
       raise exception '% exists and is a member of another role — refusing to adopt it', nm;
+    elsif exists (select 1 from pg_auth_members m
+                  join pg_roles g on g.oid = m.member
+                  where m.roleid = r.oid
+                    and g.rolname <> current_user
+                    and not g.rolsuper) then
+      -- A member of portal_owner reads every live bride's portal columns
+      -- through the `to portal_owner` policies; a member of portal_reader
+      -- calls the portal functions. Only the migration role (which hands the
+      -- functions over) and superusers (who need no membership) may be one.
+      raise exception '% exists and has members (%) — refusing to adopt it',
+        nm, (select string_agg(m.member::regrole::text, ', ')
+             from pg_auth_members m where m.roleid = r.oid);
     end if;
   end loop;
 end $$;
@@ -301,11 +360,11 @@ returns table (
 language plpgsql
 volatile
 security definer
-set search_path = ''
+set search_path = pg_catalog, pg_temp
 as $fn$
 #variable_conflict use_column
 begin
-  if p_token_hash is null or octet_length(p_token_hash) <> 32 then
+  if p_token_hash is null or pg_catalog.octet_length(p_token_hash) operator(pg_catalog.<>) 32 then
     raise exception 'portal_resolve_token: p_token_hash must be a 32-byte sha256'
       using errcode = '22023';
   end if;
@@ -325,7 +384,7 @@ begin
     insert into public.access_log
       (tenant_id, actor_kind, actor_id, bride_id, action, resource, request_id)
     select r.tenant_id, 'bride_portal', r.id, r.id,
-           'read', 'portal_resolve_token', p_request_id::text
+           'read', 'portal_resolve_token', p_request_id::pg_catalog.text
     from resolved r
   )
   select r.id, r.tenant_id, r.first_name, r.portal_expires_at
@@ -342,10 +401,10 @@ returns setof public.portal_session_view
 language plpgsql
 volatile
 security definer
-set search_path = ''
+set search_path = pg_catalog, pg_temp
 as $fn$
 begin
-  if p_token_hash is null or octet_length(p_token_hash) <> 32 then
+  if p_token_hash is null or pg_catalog.octet_length(p_token_hash) operator(pg_catalog.<>) 32 then
     raise exception 'portal_sessions: p_token_hash must be a 32-byte sha256'
       using errcode = '22023';
   end if;
@@ -364,7 +423,7 @@ begin
     insert into public.access_log
       (tenant_id, actor_kind, actor_id, bride_id, action, resource, request_id)
     select r.tenant_id, 'bride_portal', r.id, r.id,
-           'read', 'portal_sessions', p_request_id::text
+           'read', 'portal_sessions', p_request_id::pg_catalog.text
     from resolved r
   )
   select s.id, s.bride_id, s.order_index, s.scheduled_at,
@@ -389,12 +448,12 @@ returns table (
 language plpgsql
 volatile
 security definer
-set search_path = ''
+set search_path = pg_catalog, pg_temp
 as $fn$
 declare
-  v_start      timestamptz;
-  v_ip_hits    integer;
-  v_pref_hits  integer;
+  v_start      pg_catalog.timestamptz;
+  v_ip_hits    pg_catalog.int4;
+  v_pref_hits  pg_catalog.int4;
 begin
   if p_client_ip_hmac is null and p_token_hash_prefix is null then
     raise exception 'portal_rate_limit_hit: at least one bucket key is required'
@@ -405,8 +464,8 @@ begin
       using errcode = '22023';
   end if;
 
-  v_start := date_bin(make_interval(secs => p_window_seconds), now(),
-                      timestamptz '1970-01-01 00:00:00+00');
+  v_start := pg_catalog.date_bin(pg_catalog.make_interval(secs => p_window_seconds), pg_catalog.now(),
+                                 '1970-01-01 00:00:00+00'::pg_catalog.timestamptz);
 
   if p_client_ip_hmac is not null then
     insert into public.portal_rate_limit (client_ip_hmac, window_seconds, window_start)
@@ -425,7 +484,7 @@ begin
   end if;
 
   return query select v_ip_hits, v_pref_hits,
-                      v_start + make_interval(secs => p_window_seconds);
+                      v_start operator(pg_catalog.+) pg_catalog.make_interval(secs => p_window_seconds);
 end
 $fn$;
 
@@ -454,9 +513,11 @@ alter function public.portal_rate_limit_hit(bytea, bytea, integer)   owner to po
 revoke create on schema public from portal_owner;
 
 -- ---------- EXECUTE: portal_reader and nobody else ----------
--- Supabase's default privileges grant EXECUTE on new functions in `public`
--- to anon, authenticated and service_role directly, and the ownership
--- change carried the ACL over, so every role is revoked by name.
+-- 0005 removed the platform's default EXECUTE for anon, authenticated and
+-- PUBLIC, and this migration removed service_role's above, so these new
+-- functions should carry no grant but the owner's. The revokes are stated
+-- anyway: they make the intended ACL readable here, and they hold even on a
+-- database whose default privileges drifted from what the migrations set.
 revoke all on function public.portal_resolve_token(bytea, uuid)
   from public, anon, authenticated, service_role;
 revoke all on function public.portal_sessions(bytea, uuid)
