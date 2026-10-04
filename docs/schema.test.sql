@@ -2202,3 +2202,214 @@ drop schema test37 cascade;
 -- =============================================================
 -- END #37
 -- =============================================================
+
+-- =============================================================
+-- BEGIN #55 — tenant-scoped foreign keys: no attaching rows to another
+-- tenant's bride, course or session
+-- Requires migration 0010_tenant_scoped_fks.sql.
+-- =============================================================
+-- Seeded as superuser. Own ids (…55x), so the section does not depend on
+-- what earlier sections left behind.
+reset role;
+insert into bride (id, tenant_id, first_name, wedding_date, status) values
+  ('a1000000-0000-4000-8000-000000000551', 'a0000000-0000-4000-8000-000000000001', 'FkA', current_date + 90, 'active'),
+  ('b1000000-0000-4000-8000-000000000551', 'b0000000-0000-4000-8000-000000000002', 'FkB', current_date + 90, 'active');
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, status) values
+  ('a2000000-0000-4000-8000-000000000551', 'a0000000-0000-4000-8000-000000000001',
+   'a1000000-0000-4000-8000-000000000551', '{}', current_date + 76, 'active'),
+  ('b2000000-0000-4000-8000-000000000551', 'b0000000-0000-4000-8000-000000000002',
+   'b1000000-0000-4000-8000-000000000551', '{}', current_date + 76, 'active');
+insert into session (id, tenant_id, course_id, order_index, scheduled_at, status) values
+  ('a3000000-0000-4000-8000-000000000551', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000551', 1, now() + interval '5 days', 'planned'),
+  ('b3000000-0000-4000-8000-000000000551', 'b0000000-0000-4000-8000-000000000002',
+   'b2000000-0000-4000-8000-000000000551', 1, now() + interval '5 days', 'planned');
+
+-- ---------- catalog: four composite FKs, validated, actions preserved, no leftovers ----------
+do $$
+declare r record; n int;
+begin
+  for r in
+    select * from (values
+      ('course',  'course_bride_tenant_fk',             'bride',   'bride_id,tenant_id',                    'c', null::text),
+      ('session', 'session_course_tenant_fk',           'course',  'course_id,tenant_id',                   'c', null),
+      ('payment', 'payment_course_tenant_fk',           'course',  'course_id,tenant_id',                   'c', null),
+      ('session', 'session_rescheduled_from_tenant_fk', 'session', 'rescheduled_from_session_id,tenant_id', 'n', 'rescheduled_from_session_id')
+    ) v(child, conname, parent, cols, deltype, setcols)
+  loop
+    select count(*) into n
+      from pg_constraint k
+     where k.conrelid = ('public.' || r.child)::regclass
+       and k.conname = r.conname
+       and k.contype = 'f'
+       and k.convalidated
+       and k.confrelid = ('public.' || r.parent)::regclass
+       and k.confdeltype = r.deltype::"char"
+       and (select string_agg(a.attname, ',' order by u.ord)
+              from unnest(k.conkey) with ordinality u(attnum, ord)
+              join pg_attribute a on a.attrelid = k.conrelid and a.attnum = u.attnum) = r.cols
+       and (select string_agg(a.attname, ',' order by u.ord)
+              from unnest(k.confkey) with ordinality u(attnum, ord)
+              join pg_attribute a on a.attrelid = k.confrelid and a.attnum = u.attnum) = 'id,tenant_id'
+       and (select string_agg(a.attname, ',')
+              from unnest(k.confdelsetcols) u(attnum)
+              join pg_attribute a on a.attrelid = k.conrelid and a.attnum = u.attnum)
+           is not distinct from r.setcols;
+    if n <> 1 then
+      raise exception 'FAIL: %.% is not a validated (%) -> %(id,tenant_id) FK with on-delete % (set cols %)',
+        r.child, r.conname, r.cols, r.parent, r.deltype, r.setcols;
+    end if;
+
+    -- exactly one FK from child to parent over the child column: a leftover
+    -- single-column FK would make PostgREST embedding ambiguous (PGRST201)
+    select count(*) into n
+      from pg_constraint k
+     where k.conrelid = ('public.' || r.child)::regclass
+       and k.contype = 'f'
+       and k.confrelid = ('public.' || r.parent)::regclass
+       and (select attname from pg_attribute
+             where attrelid = k.conrelid and attnum = k.conkey[1]) = split_part(r.cols, ',', 1);
+    if n <> 1 then
+      raise exception 'FAIL: % FKs from %.% to %, expected exactly 1',
+        n, r.child, split_part(r.cols, ',', 1), r.parent;
+    end if;
+  end loop;
+  raise notice 'PASS: #55 four tenant-scoped FKs present, validated, actions preserved, no single-column leftovers';
+end $$;
+
+-- =============================================================
+-- As tenant A: every attach to a tenant-B object is a foreign_key_violation
+-- (RLS WITH CHECK is satisfied — tenant_id is A's own — so what rejects
+-- the row is the composite key, not the policy)
+-- =============================================================
+set role authenticated;
+set request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+
+do $$
+declare st_real text; st_fake text;
+begin
+  -- course.bride_id -> B's bride
+  begin
+    insert into course (tenant_id, bride_id, curriculum_snapshot)
+      values (auth.uid(), 'b1000000-0000-4000-8000-000000000551', '{}');
+    raise exception 'FAIL: tenant A created a course on tenant B''s bride';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- session.course_id -> B's course
+  begin
+    insert into session (tenant_id, course_id, order_index)
+      values (auth.uid(), 'b2000000-0000-4000-8000-000000000551', 9);
+    raise exception 'FAIL: tenant A created a session on tenant B''s course';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- payment.course_id -> B's course
+  begin
+    insert into payment (tenant_id, course_id, amount, method, paid_at)
+      values (auth.uid(), 'b2000000-0000-4000-8000-000000000551', 100, 'cash', current_date);
+    raise exception 'FAIL: tenant A recorded a payment against tenant B''s course';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- session.rescheduled_from_session_id -> B's session
+  begin
+    insert into session (tenant_id, course_id, order_index, rescheduled_from_session_id)
+      values (auth.uid(), 'a2000000-0000-4000-8000-000000000551', 9,
+              'b3000000-0000-4000-8000-000000000551');
+    raise exception 'FAIL: tenant A rescheduled from tenant B''s session';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- the same holds on UPDATE of an existing own row
+  begin
+    update course set bride_id = 'b1000000-0000-4000-8000-000000000551'
+     where id = 'a2000000-0000-4000-8000-000000000551';
+    raise exception 'FAIL: tenant A re-pointed her course at tenant B''s bride';
+  exception when foreign_key_violation then null;
+  end;
+  begin
+    update session set rescheduled_from_session_id = 'b3000000-0000-4000-8000-000000000551'
+     where id = 'a3000000-0000-4000-8000-000000000551';
+    raise exception 'FAIL: tenant A re-pointed her session at tenant B''s session';
+  exception when foreign_key_violation then null;
+  end;
+
+  -- the existence oracle is closed: B's real id and an id that exists
+  -- nowhere fail identically
+  begin
+    insert into payment (tenant_id, course_id, amount, method, paid_at)
+      values (auth.uid(), 'b2000000-0000-4000-8000-000000000551', 1, 'cash', current_date);
+  exception when others then st_real := sqlstate;
+  end;
+  begin
+    insert into payment (tenant_id, course_id, amount, method, paid_at)
+      values (auth.uid(), 'f2000000-0000-4000-8000-0000000005ff', 1, 'cash', current_date);
+  exception when others then st_fake := sqlstate;
+  end;
+  if st_real is distinct from '23503' or st_fake is distinct from '23503' then
+    raise exception 'FAIL: B''s course id (%) and a nonexistent id (%) are distinguishable', st_real, st_fake;
+  end if;
+
+  raise notice 'PASS: #55 cross-tenant attach rejected on all four FKs (insert and update), no existence oracle';
+end $$;
+
+-- ---------- same-tenant behaviour unchanged ----------
+do $$
+declare n int;
+begin
+  insert into course (id, tenant_id, bride_id, curriculum_snapshot)
+    values ('a2000000-0000-4000-8000-000000000552', auth.uid(),
+            'a1000000-0000-4000-8000-000000000551', '{}');
+  insert into session (id, tenant_id, course_id, order_index, status)
+    values ('a3000000-0000-4000-8000-000000000552', auth.uid(),
+            'a2000000-0000-4000-8000-000000000551', 2, 'planned');
+  insert into session (id, tenant_id, course_id, order_index, rescheduled_from_session_id)
+    values ('a3000000-0000-4000-8000-000000000553', auth.uid(),
+            'a2000000-0000-4000-8000-000000000551', 3, 'a3000000-0000-4000-8000-000000000552');
+  insert into payment (id, tenant_id, course_id, amount, method, paid_at)
+    values ('a5000000-0000-4000-8000-000000000551', auth.uid(),
+            'a2000000-0000-4000-8000-000000000551', 250, 'bit', current_date);
+  update session set location = 'Same tenant'
+   where id = 'a3000000-0000-4000-8000-000000000553';
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'FAIL: same-tenant session update affected % rows', n; end if;
+  raise notice 'PASS: #55 same-tenant inserts and updates on all four FKs succeed';
+end $$;
+
+-- ---------- referential actions, exercised (hard deletes, as superuser) ----------
+reset role;
+do $$
+declare n int; t uuid; p uuid;
+begin
+  -- SET NULL (rescheduled_from_session_id) nulls the pointer, keeps tenant_id
+  delete from session where id = 'a3000000-0000-4000-8000-000000000552';
+  select tenant_id, rescheduled_from_session_id into t, p
+    from session where id = 'a3000000-0000-4000-8000-000000000553';
+  if not found then raise exception 'FAIL: deleting the original session deleted the rescheduled one'; end if;
+  if p is not null then raise exception 'FAIL: rescheduled_from_session_id not nulled (%)', p; end if;
+  if t is distinct from 'a0000000-0000-4000-8000-000000000001' then
+    raise exception 'FAIL: SET NULL touched session.tenant_id (%)', t;
+  end if;
+
+  -- CASCADE: bride -> course -> session, payment
+  delete from bride where id = 'a1000000-0000-4000-8000-000000000551';
+  select count(*) into n from course
+   where id in ('a2000000-0000-4000-8000-000000000551', 'a2000000-0000-4000-8000-000000000552');
+  if n <> 0 then raise exception 'FAIL: % courses survived their bride''s deletion', n; end if;
+  select count(*) into n from session where course_id = 'a2000000-0000-4000-8000-000000000551';
+  if n <> 0 then raise exception 'FAIL: % sessions survived their course''s deletion', n; end if;
+  select count(*) into n from payment where course_id = 'a2000000-0000-4000-8000-000000000551';
+  if n <> 0 then raise exception 'FAIL: % payments survived their course''s deletion', n; end if;
+
+  -- and tenant B's objects were never touched
+  select count(*) into n from session where id = 'b3000000-0000-4000-8000-000000000551';
+  if n <> 1 then raise exception 'FAIL: tenant B''s session disappeared'; end if;
+
+  raise notice 'PASS: #55 cascade and set-null (column list) semantics preserved';
+end $$;
+
+delete from bride where id = 'b1000000-0000-4000-8000-000000000551';
+-- =============================================================
+-- END #55
+-- =============================================================
