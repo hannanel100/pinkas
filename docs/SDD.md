@@ -851,15 +851,16 @@ Consequences accepted: moving regions later is a database migration with downtim
 8. The three private field names appear in exactly one relation in the schema.
 9. All five risk tiers rank as §8.1 specifies.
 
+Each later migration appends its own section to the suite, headed with its issue numbers — the atomic signup seed (#36), the Israeli-clock risk view (#38, #42), `today_screen` (#35), the platform-grant revokes and the audited `session_record` reader (#31, #34), the portal objects (#37) — so the list above is the floor, not the whole.
+
 To run, with any Postgres 15+:
 
 ```bash
-createdb pinkas_test
-psql -d pinkas_test -v ON_ERROR_STOP=1 \
-  -f docs/schema.bootstrap.sql \   # emulates Supabase's auth.uid() and roles
-  -f docs/schema.sql \
-  -f docs/schema.test.sql
+./scripts/test-schema.sh                             # as superuser; the CI path
+SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh   # as a non-superuser role shaped like Supabase's
 ```
+
+The script applies `schema.bootstrap.sql` (which emulates Supabase's `auth.uid()`, roles and default privileges), then every file in `supabase/migrations/` in order, then `schema.test.sql`. It does not read `schema.sql`, which is frozen at `0001_init.sql`: the schema under test is the one that ships.
 
 Non-zero exit means the isolation design regressed. This belongs in CI from the first commit.
 

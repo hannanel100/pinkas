@@ -54,12 +54,11 @@ These are load-bearing. Each one is enforced by a test or a lint rule, not by re
 ## Verifying the schema
 
 ```bash
-createdb pinkas_test
-psql -d pinkas_test -v ON_ERROR_STOP=1 \
-  -f docs/schema.bootstrap.sql \
-  -f docs/schema.sql \
-  -f docs/schema.test.sql
+./scripts/test-schema.sh                             # as superuser; the CI path
+SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh   # as a non-superuser role shaped like Supabase's; throwaway cluster only
 ```
+
+The script builds the database from `supabase/migrations/` in order — the schema that actually ships — and rejects a gap in the migration numbers. `docs/schema.sql` is frozen at `0001_init.sql` (see `docs/runbooks/migrations.md`); schema changes go into a new migration, never into `schema.sql`.
 
 A non-zero exit means the isolation design has regressed. Run this after any schema change.
 
