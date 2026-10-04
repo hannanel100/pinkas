@@ -16,7 +16,7 @@ One module per access path, so the trust levels cannot blur:
 `server-only`, and **only `lib/data/context.ts` may import it** (lint-enforced) — context.ts hands a
 client only to the body of a `defineRead`/`defineMutation`, whose wrapper writes the access log.
 
-The session cookie is `HttpOnly; Secure; SameSite=Lax; Path=/`. `@supabase/ssr` defaults to
+The session cookie is `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30 days; `Lax` because `Strict` would drop the cookie when she opens the app from WhatsApp). The matching Auth inactivity timeout is an `infra` project setting (#39). `@supabase/ssr` defaults to
 `httpOnly: false` and Next's `cookies().set()` does not default to it either, so the flags are
 forced as `cookieOptions` and again over whatever the library passes to `setAll`. `user.test.ts`
 drives a real OTP verification and sign-out through the library and asserts the flags from the
@@ -32,5 +32,5 @@ The portal does not use Supabase's API at all: it has its own Postgres credentia
 under `app/`, `lib/` or `components/` is a lint error; a `lib/supabase/service` module is
 import-banned everywhere. `scripts/` is exempt — the staging harness lives there.
 
-`testing/postgrest-client.ts` is test-only: a supabase-js client against a local PostgREST, used by
+`testing/postgrest-client.ts` is test-only — importable from `*.test.ts` alone (lint) — a supabase-js client against a local PostgREST, used by
 `lib/data/integration.test.ts` at the factory seam.

@@ -67,8 +67,9 @@ function sessionCookies(): string[] {
   return jar.headers.getSetCookie().filter((c) => c.startsWith("sb-"));
 }
 
-function expectFlags(header: string) {
+function expectFlags(header: string, maxAge: number) {
   const attrs = header.split(";").map((a) => a.trim().toLowerCase());
+  expect(attrs, header).toContain(`max-age=${maxAge}`);
   expect(attrs, header).toContain("httponly");
   expect(attrs, header).toContain("secure");
   expect(attrs, header).toContain("samesite=lax");
@@ -84,10 +85,11 @@ describe("session cookie flags, read from Set-Cookie", () => {
     expect(error).toBeNull();
     await vi.waitFor(() => expect(sessionCookies().length).toBeGreaterThan(0));
 
-    for (const header of sessionCookies()) expectFlags(header);
+    // 30 days, not the library's 400 (#60 review)
+    for (const header of sessionCookies()) expectFlags(header, 2592000);
   });
 
-  it("are set on the clearing cookie at sign-out too", async () => {
+  it("are set on the clearing cookie at sign-out too, which stays a removal", async () => {
     const { createUserClient } = await import("./user");
     const client = await createUserClient();
     await client.auth.verifyOtp({ phone: "+972501234567", token: "123456", type: "sms" });
@@ -103,12 +105,18 @@ describe("session cookie flags, read from Set-Cookie", () => {
     const again = await createUserClient();
     await again.auth.signOut({ scope: "local" });
     await vi.waitFor(() => expect(sessionCookies().length).toBeGreaterThan(0));
-    for (const header of sessionCookies()) expectFlags(header);
+    for (const header of sessionCookies()) expectFlags(header, 0);
   });
 
   it("override whatever options the library hands setAll", async () => {
     const { SESSION_COOKIE_FLAGS } = await import("./user");
-    expect(SESSION_COOKIE_FLAGS).toEqual({ httpOnly: true, secure: true, sameSite: "lax", path: "/" });
+    expect(SESSION_COOKIE_FLAGS).toEqual({
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 30 * 24 * 60 * 60,
+    });
     expect(Object.isFrozen(SESSION_COOKIE_FLAGS)).toBe(true);
   });
 

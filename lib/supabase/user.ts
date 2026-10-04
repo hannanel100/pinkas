@@ -35,12 +35,24 @@ import { cookies } from "next/headers";
  * and sign-in is a Server Action (SDD §6.1), so the browser has no edge to Auth.
  */
 
-/** The flags every session cookie carries. Asserted from `Set-Cookie`. */
+/**
+ * The flags every session cookie carries. Asserted from `Set-Cookie`.
+ *
+ * * `sameSite: "lax"`, not `"strict"`: she opens the app from a WhatsApp link,
+ *   and a strict cookie is not sent on that first cross-site navigation.
+ * * `maxAge` 30 days, not `@supabase/ssr`'s 400: a phone handed to a child
+ *   (SDD §6.1) should not stay signed in for over a year. The matching Auth
+ *   inactivity timeout is a project setting, `infra`'s (#39) — the cookie
+ *   bounds the browser side only.
+ */
+export const SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
+
 export const SESSION_COOKIE_FLAGS = Object.freeze({
   httpOnly: true,
   secure: true,
   sameSite: "lax",
   path: "/",
+  maxAge: SESSION_COOKIE_MAX_AGE,
 } as const);
 
 /**
@@ -92,8 +104,15 @@ export async function createUserClient(): Promise<UserClient> {
       setAll(toSet) {
         try {
           for (const { name, value, options } of toSet) {
-            // Spread LAST: the library's options never override the flags.
-            store.set(name, value, { ...options, ...SESSION_COOKIE_FLAGS });
+            // Spread LAST: the library's options never override the flags —
+            // except a removal (`maxAge: 0`, sign-out), which must stay a
+            // removal rather than become a 30-day empty cookie.
+            const removal = options?.maxAge === 0;
+            store.set(name, value, {
+              ...options,
+              ...SESSION_COOKIE_FLAGS,
+              ...(removal ? { maxAge: 0 } : {}),
+            });
           }
         } catch {
           // Server Component render — see the function comment.
