@@ -142,10 +142,27 @@ Per migration:
    ```bash
    PINKAS_LIVE_TEST=staging node scripts/test-live-rls.mjs
    ```
-   The harness deletes everything it seeded **except its `access_log` rows**:
-   since `0005` the service key cannot delete from the audit log, by design.
-   It prints the throwaway tenant ids and the run's `request_id` so those
-   rows can be recognised. Staging holds fake data only.
+   The harness seeds through each throwaway tenant's own JWT and uses the
+   service key only for `auth.admin` (creating and deleting the two users):
+   since `0008` the service key holds nothing in `public`. It deletes
+   everything it seeded **except its `access_log` rows** — nobody can delete
+   from the audit log, by design. It prints the throwaway tenant ids and the
+   run's `request_id` so those rows can be recognised. Staging holds fake
+   data only.
+
+   `verify-live-schema.sh` step 4 needs two connection strings, exported for
+   one shell session from the operator's keychain and never written to a
+   file: `LIVE_DB_URL` (the migration role, `postgres`; the step runs
+   read-only) and `LIVE_PORTAL_DB_URL` (the `portal_reader` login set up by
+   the infra runbook). Without them the script exits 2 — partially verified.
+
+   **Before pushing `0008`**, run as the migration role (the header of `0008`
+   explains each):
+   ```sql
+   select rolname from pg_roles where rolname in ('portal_owner', 'portal_reader');  -- expect 0 rows
+   select rolcreaterole from pg_roles where rolname = current_user;                 -- expect t
+   select has_schema_privilege(current_user, 'public', 'CREATE WITH GRANT OPTION'); -- expect t
+   ```
 
    **Before pushing `0006`** (and any migration that creates a role or hands
    an object to one), run as the migration role and confirm one row, `t`:
@@ -188,22 +205,33 @@ of current behaviour is `docs/schema.test.sql`.
 ## Grants: closed by default (decided under #31)
 
 From `0005` on, objects a migration creates in `public` arrive with **no**
-privileges for `anon`, `authenticated` or `PUBLIC`. Every migration grants
-explicitly, next to the `CREATE`, exactly what its access path needs —
-`authenticated` for instructor traffic, `service_role` for the portal path —
-and never grants to `anon`. A function `service_role` must not call needs an
-explicit `revoke execute ... from service_role`: the platform's default grant
-to `service_role` is deliberately kept (reasoning in `0005`'s header). The
-`#31` section of `schema.test.sql` enumerates every object in `public`, so a
-migration that breaks this fails CI.
+privileges for `anon`, `authenticated` or `PUBLIC`; from `0008`
+([ADR-0010](../adr/0010-portal-database-login.md)) none for `service_role`
+either. Every migration grants explicitly, next to the `CREATE`, exactly what
+its access path needs, and to no one else:
 
-> **Changes with 0008 ([ADR-0010](../adr/0010-portal-database-login.md)).**
-> The portal path stops being `service_role`. From 0008 it is `portal_reader`,
-> which gets `EXECUTE` on the `portal_*` functions and nothing else. Every
-> `service_role` grant in `public`, and its default privileges there, are
-> revoked. A migration written after 0008 grants nothing to `service_role`,
-> and nothing to `portal_reader` beyond a new `portal_*` function. 0008
-> rewrites this paragraph.
+* `authenticated` — instructor traffic.
+* `portal_reader` — the bride portal's database login. It holds `EXECUTE` on
+  the `portal_*` functions and nothing else; a new portal capability is a new
+  `portal_*` function owned by `portal_owner`, never a table or view grant.
+* `portal_owner` — owner of those functions (`NOLOGIN`, `NOBYPASSRLS`); it gets
+  the column grants and the `to portal_owner` policies the functions need.
+* **Never** `anon`, and **never** `service_role`. Nothing deployed uses the
+  service-role key (ADR-0010 §3), and a grant to it is a grant to a
+  `BYPASSRLS` role.
+
+The platform's default privileges would grant `EXECUTE` on every new function
+to `anon`, `authenticated` and `service_role`; `0005` removed those defaults
+for `anon`, `authenticated` and `PUBLIC`, and `0008` for `service_role`, so a
+new function is executable by its owner alone until a migration grants it.
+Grant explicitly; a defensive `revoke` next to the grant is welcome but no
+longer load-bearing. Every `SECURITY DEFINER` function sets
+`search_path = pg_catalog, pg_temp` and schema-qualifies its types and
+relations — never `search_path = ''`, which still searches `pg_temp` first
+for type and relation names (security review of #61). The
+`#31` and `#53` sections of `schema.test.sql` enumerate every object in
+`public` for every one of these roles, so a migration that breaks this fails
+CI; `verify-live-schema.sh` step 4 asserts the same on the live project.
 
 ## The platform-object allowlist (decided under #31)
 

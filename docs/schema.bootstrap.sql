@@ -36,3 +36,14 @@ alter default privileges in schema public
   grant all on sequences to anon, authenticated, service_role;
 alter default privileges in schema public
   grant all on functions to anon, authenticated, service_role;
+
+-- Roles are cluster-wide, so a cluster reused across runs (or across the
+-- superuser and SCHEMA_TEST_AS_MIGRATOR modes) can carry memberships in
+-- 0008's roles from an earlier run. 0008 refuses to adopt a portal role with
+-- a member other than the migration role or a superuser (security review of
+-- #61), so start every run from a fresh project's state: no members at all.
+select format('revoke %I from %I granted by %I cascade',
+              m.roleid::regrole, m.member::regrole, m.grantor::regrole)
+from pg_auth_members m
+where m.roleid in (select oid from pg_roles where rolname in ('portal_owner', 'portal_reader'))
+\gexec

@@ -42,13 +42,31 @@ not a finding.
   well-intentioned one ("exposing the topic list") — the correct answer is a new view.
 * No join, view, RPC, or API response reaches `session_record` from a portal path.
 
-**3. Service-role containment**
-* The service-role key appears only in `lib/data/portal.ts` and job code. Grep for every
-  construction site, not just imports.
-* No service-role client is reachable from a code path taking arbitrary user input. The only
-  untrusted input it may see is a portal token, hashed before use.
-* The explicit `bride_id` filter is present on every service-role query. Its absence is critical:
-  the service role bypasses RLS, so that filter is the entire boundary.
+**3. Portal credential and service-role containment** (invariant 5, ADR-0010, migration 0008)
+* `SUPABASE_SERVICE_ROLE_KEY` appears nowhere under `app/`, `lib/` or `components/` — no
+  construction site, no env read, no fallback. Lint carries a lexical tripwire for this and for the
+  next rule from #60; a tripwire is not proof, so grep regardless. `scripts/` (the staging harness, `auth.admin` only)
+  is the one exemption. A service key in any deployed environment is a critical finding: it is
+  also the GoTrue admin credential, so it can sign in as any instructor.
+* `PORTAL_DATABASE_URL` is read in `lib/data/portal.ts` only, and that module calls only the
+  `portal_*` functions — never a table or view, never a raw query that names one.
+* The database enforces the same, and a migration that weakens it is a critical finding:
+  `portal_reader` holds `EXECUTE` on `portal_resolve_token`, `portal_sessions` and
+  `portal_rate_limit_hit` and nothing else; the functions are `SECURITY DEFINER` owned by
+  `portal_owner` (`NOLOGIN`, `NOBYPASSRLS` — never a `BYPASSRLS` role); `service_role` holds
+  nothing in `public`. The `#53` section of `schema.test.sql` and `verify-live-schema.sh` step 4
+  assert all three.
+* Each portal lookup takes the token **hash** and nothing else that selects rows. A new portal
+  function with a `bride_id`, `tenant_id` or free-filter parameter is a critical finding: the hash
+  predicate inside the function is the entire row boundary on this path.
+* Portal reads log themselves (`('bride_portal', bride_id)`, in the same statement) — completely
+  only for a caller that commits. Check that `portal.ts` calls each portal function as a plain
+  autocommit `SELECT`, never inside a transaction (a rollback keeps the rows and drops the log
+  row), and does not add a second, application-level `logAccess` for the same read.
+* Every `SECURITY DEFINER` function sets `search_path = pg_catalog, pg_temp` and qualifies its
+  types and relations. `search_path = ''` is a finding: Postgres still searches `pg_temp` first for
+  type and relation names, and any role with TEMP (PUBLIC has it) can plant a domain that runs code
+  as the owner (security review of #61).
 * `app/p/` imports no instructor data module; instructor code imports no `portal.ts`.
 
 **4. Portal tokens**

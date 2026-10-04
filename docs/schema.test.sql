@@ -104,8 +104,15 @@ begin
   select count(*) into n from v_course_risk;
   if n <> 6 then raise exception 'FAIL: v_course_risk leaked across tenants (% rows)', n; end if;
 
-  select count(*) into n from portal_session_view where bride_id = 'b1000000-0000-4000-8000-000000000001';
-  if n <> 0 then raise exception 'FAIL: portal_session_view leaked tenant B rows'; end if;
+  -- #53 (0008): portal_session_view has no direct reader but portal_owner;
+  -- an instructor JWT is refused outright. That it still respects the
+  -- caller's RLS (security_invoker) is asserted in the #53 section under a
+  -- temporary, rolled-back grant.
+  begin
+    select count(*) into n from portal_session_view where bride_id = 'b1000000-0000-4000-8000-000000000001';
+    raise exception 'FAIL: authenticated can read portal_session_view (% rows)', n;
+  exception when insufficient_privilege then null;
+  end;
 
   -- 5. writes cannot be attributed to another tenant
   begin
@@ -1263,51 +1270,36 @@ begin
      or has_function_privilege('authenticated', 'public.probe31_fn()', 'EXECUTE') then
     raise exception 'FAIL: a new function defaults to EXECUTE for anon/authenticated/PUBLIC';
   end if;
-  -- The recorded service_role decision: its platform defaults are kept. This
-  -- also proves the bootstrap's platform emulation is active, without which
-  -- every assertion above would be vacuous.
-  if not has_table_privilege('service_role', 'public.probe31', 'SELECT')
-     or not has_function_privilege('service_role', 'public.probe31_fn()', 'EXECUTE') then
-    raise exception 'FAIL: service_role default privileges changed (or the bootstrap no longer emulates the platform) - 0005 records keeping them';
+  -- service_role: 0005 kept its platform defaults; 0008 (#53) revoked them.
+  -- The #53 section probes service_role, portal_reader and portal_owner on
+  -- objects created after every migration, and proves there that the
+  -- bootstrap's platform emulation is active (without which every assertion
+  -- here would be vacuous).
+  if has_table_privilege('service_role', 'public.probe31', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+     or has_sequence_privilege('service_role', 'public.probe31_seq', 'USAGE,SELECT,UPDATE')
+     or has_function_privilege('service_role', 'public.probe31_fn()', 'EXECUTE') then
+    raise exception 'FAIL: a new object defaults to privileges for service_role (0008 revokes them)';
   end if;
-  raise notice 'PASS: new tables, sequences and functions grant nothing to anon or authenticated; service_role defaults kept as recorded';
+  raise notice 'PASS: new tables, sequences and functions grant nothing to anon, authenticated or service_role';
 end $$;
 rollback;
 
--- ---------- #31: service_role's table privileges are stated, not ambient ----------
-do $$
-declare r record;
-begin
-  for r in
-    select c.oid::regclass as obj
-    from pg_class c
-    where c.relnamespace = 'public'::regnamespace and c.relkind in ('r','v')
-      and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass
-                      and d.objid = c.oid and d.deptype = 'e')
-      and c.relname <> 'session_record'   -- narrowed by 0006, asserted below
-  loop
-    if not has_table_privilege('service_role', r.obj, 'SELECT') then
-      raise exception 'FAIL: service_role lost SELECT on % (0005 records keeping it)', r.obj;
-    end if;
-  end loop;
-  raise notice 'PASS: service_role keeps SELECT on every public relation except session_record';
-end $$;
+-- ---------- #31 → #53: service_role's table privileges ----------
+-- 0005 kept service_role's platform grants as a recorded decision; 0008
+-- (#53, ADR-0010) reversed it. The full enumeration — every relation,
+-- sequence and function in `public` — is in the #53 section.
 
 -- ---------- #31: service_role cannot erase or rewrite the audit trail ----------
 -- It holds BYPASSRLS, so privileges are the only thing between a service
--- key and access_log. Append and read; nothing else.
+-- key and access_log. Since 0008 it cannot even append or read.
 do $$
 declare p text;
 begin
-  foreach p in array array['UPDATE','DELETE','TRUNCATE','TRIGGER','REFERENCES'] loop
+  foreach p in array array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','TRIGGER','REFERENCES'] loop
     if has_table_privilege('service_role', 'public.access_log', p) then
       raise exception 'FAIL: service_role holds % on access_log', p;
     end if;
   end loop;
-  if not has_table_privilege('service_role', 'public.access_log', 'INSERT')
-     or not has_table_privilege('service_role', 'public.access_log', 'SELECT') then
-    raise exception 'FAIL: service_role lost INSERT/SELECT on access_log';
-  end if;
 end $$;
 set role service_role;
 do $$
@@ -1327,7 +1319,7 @@ begin
     raise exception 'FAIL: service_role truncated access_log';
   exception when insufficient_privilege then null;
   end;
-  raise notice 'PASS: service_role may append to and read access_log, never update, delete or truncate it';
+  raise notice 'PASS: service_role can neither read, append to, update, delete nor truncate access_log';
 end $$;
 reset role;
 
@@ -1912,12 +1904,30 @@ end $$;
 do $$
 declare r text;
 begin
-  if not has_table_privilege('service_role', 'public.portal_bride_view', 'select') then
-    raise exception 'FAIL: service_role cannot select portal_bride_view';
+  -- Since 0008 (#53): the view is read by portal_owner (inside the portal_*
+  -- functions) and the counter is reached through portal_rate_limit_hit,
+  -- executable by portal_reader. service_role holds nothing here any more.
+  if not has_table_privilege('portal_owner', 'public.portal_bride_view', 'select') then
+    raise exception 'FAIL: portal_owner cannot select portal_bride_view';
   end if;
-  if not has_function_privilege('service_role', 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
-    raise exception 'FAIL: service_role cannot execute portal_rate_limit_hit';
+  if not has_function_privilege('portal_reader', 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
+    raise exception 'FAIL: portal_reader cannot execute portal_rate_limit_hit';
   end if;
+
+  foreach r in array array['anon', 'authenticated', 'service_role', 'portal_reader'] loop
+    if r <> 'portal_reader' and has_function_privilege(r, 'public.portal_rate_limit_hit(bytea,bytea,integer)', 'execute') then
+      raise exception 'FAIL: % can execute portal_rate_limit_hit', r;
+    end if;
+    if has_table_privilege(r, 'public.portal_bride_view', 'select') then
+      raise exception 'FAIL: % can select portal_bride_view', r;
+    end if;
+    if has_table_privilege(r, 'public.portal_rate_limit', 'select,insert,update,delete') then
+      raise exception 'FAIL: % has privileges on portal_rate_limit', r;
+    end if;
+    if has_function_privilege(r, 'public.portal_rate_limit_prune()', 'execute') then
+      raise exception 'FAIL: % can execute portal_rate_limit_prune', r;
+    end if;
+  end loop;
 
   foreach r in array array['anon', 'authenticated'] loop
     if has_table_privilege(r, 'public.portal_bride_view', 'select') then
@@ -1946,7 +1956,7 @@ begin
     raise exception 'FAIL: a #37 function is executable by PUBLIC';
   end if;
 
-  raise notice 'PASS: #37 objects are granted to service_role only';
+  raise notice 'PASS: #37 objects are reachable by portal_owner / portal_reader only (0008)';
 end $$;
 
 -- ---------- browser roles are refused outright ----------
@@ -1988,8 +1998,11 @@ begin
 end $$;
 reset role;
 
--- ---------- token resolution, as the service role ----------
-set role service_role;
+-- ---------- token resolution, as portal_owner ----------
+-- Since 0008 (#53) the view's only reader is portal_owner, inside the
+-- portal_* functions; this block reads it directly as that role to pin what
+-- the view itself does. The functions are asserted in the #53 section.
+set role portal_owner;
 set request.jwt.claims = '{}';
 do $$
 declare r record; n int;
@@ -2012,32 +2025,49 @@ begin
   select count(*) into n from portal_bride_view where portal_token_hash = sha256('not-a-token');
   if n <> 0 then raise exception 'FAIL: an unknown token resolved'; end if;
 
-  -- The honest half: this view is NOT isolation. Without the hash predicate the
-  -- service role sees every tenant's resolvable brides. This assertion pins
-  -- that, so nobody reads the view as a tenant boundary — re-read the 0007
-  -- header before changing it.
+  -- The honest half: this view is NOT isolation. Without the hash predicate
+  -- its reader sees every tenant's resolvable brides (portal_owner's policy
+  -- on bride is deliberately not tenant-scoped). This assertion pins that, so
+  -- nobody reads the view as a tenant boundary — the boundary is the fixed
+  -- predicate inside portal_resolve_token / portal_sessions (0008), and
+  -- portal_owner being reachable only through them.
   select count(*) into n from portal_bride_view;
   if n <> 2 then
     raise exception 'FAIL: unfiltered portal_bride_view returned % rows, expected 2 (A live + B live)', n;
   end if;
 
-  -- The service role and the base tables. schema.bootstrap.sql models
-  -- Supabase's default privileges (#31), so service_role holds table-level
-  -- SELECT on `bride` here exactly as it does on live Supabase: the portal key
-  -- CAN read bride.phone, and RLS does not stop it (BYPASSRLS). 0007's column
-  -- grant narrows nothing until a migration revokes that table-level privilege
-  -- (#53). This assertion pins the current state, so the migration that lands
-  -- the revoke has to change it — and the 0007 header — in the same diff.
-  if not has_table_privilege('service_role', 'public.bride', 'SELECT') then
-    raise exception 'FAIL: service_role lost table-level SELECT on bride; update this assertion and the 0007 header together (#53)';
+  -- #53 flipped this pin. schema.bootstrap.sql models Supabase's default
+  -- privileges (#31), under which service_role held table-level SELECT on
+  -- `bride` and could read bride.phone past RLS (BYPASSRLS). 0008 revokes it:
+  -- neither service_role nor either portal role can read bride.phone, and
+  -- 0007's column grant is now the complete set the view needs, held by
+  -- portal_owner.
+  if has_table_privilege('service_role', 'public.bride', 'SELECT')
+     or has_column_privilege('service_role', 'public.bride', 'phone', 'SELECT') then
+    raise exception 'FAIL: service_role can read bride.phone (0008 revokes it, #53)';
   end if;
+  if has_table_privilege('portal_owner', 'public.bride', 'SELECT')
+     or has_column_privilege('portal_owner', 'public.bride', 'phone', 'SELECT')
+     or has_column_privilege('portal_reader', 'public.bride', 'phone', 'SELECT') then
+    raise exception 'FAIL: a portal role can read bride.phone';
+  end if;
+  begin
+    perform phone from bride;
+    raise exception 'FAIL: portal_owner read bride.phone';
+  exception when insufficient_privilege then null;
+  end;
   -- session_record's private columns are refused to service_role by 0006 and
   -- asserted in the #31 / #34 section; nothing in 0007 touches session_record.
 
   raise notice 'PASS: portal_bride_view resolves live tokens only; column-narrowed, explicitly not tenant-isolated';
 end $$;
 
--- ---------- rate-limit counter, as the service role ----------
+-- ---------- rate-limit counter, as portal_reader ----------
+-- Since 0008 (#53) the counter is reached only through
+-- portal_rate_limit_hit (SECURITY DEFINER, owned by portal_owner), which
+-- portal_reader — the portal's login — may execute.
+reset role;
+set role portal_reader;
 -- Clock-independent by construction: everything below runs in one DO block,
 -- i.e. one transaction, and portal_rate_limit_hit() takes its window from
 -- now() — the transaction start — so every hit here lands in the same window
@@ -2102,17 +2132,25 @@ begin
     raise exception 'FAIL: a raw IP was accepted as client_ip_hmac';
   exception when check_violation then null;
   end;
-  -- and a row cannot key on both at once
+  -- portal_reader cannot write the table except through the function (0008)
   begin
-    insert into portal_rate_limit (client_ip_hmac, token_hash_prefix, window_start, window_seconds)
-    values (sha256('ip:203.0.113.8'), '\xdeadbeefdeadbeef'::bytea, now(), 60);
-    raise exception 'FAIL: a row keyed on both ip and prefix was accepted';
-  exception when check_violation then null;
+    insert into portal_rate_limit (client_ip_hmac, window_start, window_seconds)
+    values (sha256('ip:203.0.113.8'), now(), 60);
+    raise exception 'FAIL: portal_reader wrote portal_rate_limit directly';
+  exception when insufficient_privilege then null;
   end;
 
   raise notice 'PASS: portal_rate_limit_hit counts per IP-HMAC and per hash prefix in fixed windows';
 end $$;
 reset role;
+-- a row cannot key on both at once (the table's own CHECK, as its owner)
+do $$
+begin
+  insert into portal_rate_limit (client_ip_hmac, token_hash_prefix, window_start, window_seconds)
+  values (sha256('ip:203.0.113.8'), '\xdeadbeefdeadbeef'::bytea, now(), 60);
+  raise exception 'FAIL: a row keyed on both ip and prefix was accepted';
+exception when check_violation then null;
+end $$;
 
 -- ---------- prune removes ended windows only ----------
 -- Clock-independent: the expected count is computed in the same transaction
@@ -2120,7 +2158,11 @@ reset role;
 -- since the block above simply counts as ended on both sides.
 insert into portal_rate_limit (client_ip_hmac, window_start, window_seconds, hits)
 values (sha256('ip:198.51.100.1'), now() - interval '2 hours', 3600, 9);
-set role service_role;
+-- Since 0008 (#53) prune is executable by its owner only — the migration
+-- role, which is what the pg_cron job runs as (`postgres` on Supabase).
+select format('set role %I', proowner::regrole)
+from pg_proc where oid = 'public.portal_rate_limit_prune()'::regprocedure
+\gexec
 do $$
 declare n int; want int; before int;
 begin
@@ -2145,7 +2187,7 @@ end $$;
 reset role;
 
 -- ---------- concurrency: no lost increments ----------
--- Four real backends, as service_role, each committing 250 separate
+-- Four real backends, as portal_reader (#53), each committing 250 separate
 -- autocommit calls against the same two counters, interleaved so that every
 -- round has four calls in flight at once. dblink lives in a scratch schema
 -- that is dropped afterwards, so it never looks like part of the schema.
@@ -2170,7 +2212,7 @@ declare
 begin
   for c in 1..4 loop
     perform test37.dblink_connect('c37_' || c, conninfo);
-    perform test37.dblink_exec('c37_' || c, 'set role service_role');
+    perform test37.dblink_exec('c37_' || c, 'set role portal_reader');
   end loop;
   for i in 1..250 loop
     for c in 1..4 loop
@@ -2201,4 +2243,563 @@ end $$;
 drop schema test37 cascade;
 -- =============================================================
 -- END #37
+-- =============================================================
+
+
+-- =============================================================
+-- BEGIN #53 — containment: portal_reader / portal_owner; service_role holds
+--             nothing in `public`
+-- Requires migration 0008_portal_database_login.sql. Decision: ADR-0010.
+-- Uses the #37 fixtures (tokens tok-37-*). Literal ids:
+--   bride A live   a1000000-0000-4000-8000-000000000371  (tenant A)
+--   bride B live   b1000000-0000-4000-8000-000000000371  (tenant B, no course)
+--   course         a2000000-0000-4000-8000-000000000531
+--   request ids    53000000-0000-4000-8000-00000000000N
+-- =============================================================
+insert into course (id, tenant_id, bride_id, curriculum_snapshot, target_end_date, status) values
+  ('a2000000-0000-4000-8000-000000000531', 'a0000000-0000-4000-8000-000000000001',
+   'a1000000-0000-4000-8000-000000000371', '{}', current_date + 30, 'active');
+insert into session (id, tenant_id, course_id, order_index, scheduled_at, location, status, deleted_at) values
+  ('a3000000-0000-4000-8000-000000000531', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000531', 1, now() + interval '3 days', 'Herzl 14', 'planned', null),
+  ('a3000000-0000-4000-8000-000000000532', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000531', 2, now() + interval '10 days', null, 'planned', null),
+  ('a3000000-0000-4000-8000-000000000533', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000531', 3, now() + interval '17 days', null, 'planned', now());
+insert into session_record (session_id, tenant_id, private_note, needs_review_note) values
+  ('a3000000-0000-4000-8000-000000000531', 'a0000000-0000-4000-8000-000000000001',
+   'A53 private note', 'A53 review note');
+
+-- ---------- shape: the two roles ----------
+do $$
+declare r pg_roles%rowtype;
+begin
+  select * into r from pg_roles where rolname = 'portal_owner';
+  if not found then raise exception 'FAIL: role portal_owner is missing'; end if;
+  if r.rolsuper or r.rolbypassrls or r.rolcanlogin or r.rolcreaterole or r.rolcreatedb or r.rolreplication then
+    raise exception 'FAIL: portal_owner must be NOLOGIN, NOBYPASSRLS, NOSUPERUSER, no CREATEROLE/CREATEDB/REPLICATION';
+  end if;
+
+  -- portal_reader's LOGIN is set out of band (#56), so it is not asserted
+  -- either way here; everything else is.
+  select * into r from pg_roles where rolname = 'portal_reader';
+  if not found then raise exception 'FAIL: role portal_reader is missing'; end if;
+  if r.rolsuper or r.rolbypassrls or r.rolinherit or r.rolcreaterole or r.rolcreatedb or r.rolreplication then
+    raise exception 'FAIL: portal_reader must be NOBYPASSRLS, NOINHERIT, NOSUPERUSER, no CREATEROLE/CREATEDB/REPLICATION';
+  end if;
+  if r.rolconnlimit <> 20 then
+    raise exception 'FAIL: portal_reader connection limit is %, expected 20', r.rolconnlimit;
+  end if;
+  if not exists (select 1 from pg_db_role_setting s
+                 where s.setrole = r.oid and s.setdatabase = 0
+                   and 'statement_timeout=2s' = any (s.setconfig)) then
+    raise exception 'FAIL: portal_reader has no role-level statement_timeout = 2s';
+  end if;
+
+  -- members of nothing: no path to authenticated's policies or anyone's grants
+  if exists (select 1 from pg_auth_members m
+             where m.member in ('portal_owner'::regrole, 'portal_reader'::regrole)) then
+    raise exception 'FAIL: a portal role is a member of another role';
+  end if;
+  -- and nobody but the migration role (or a superuser) is a member of
+  -- either, directly or through another role: a member of portal_owner reads
+  -- every live bride's portal columns through its policies (security review
+  -- of #61). pg_has_role(..., 'MEMBER') follows indirect membership.
+  if exists (select 1 from pg_roles g, (values ('portal_owner'), ('portal_reader')) t(portal)
+             where pg_has_role(g.oid, t.portal::regrole, 'MEMBER')
+               and g.rolname <> t.portal
+               and not g.rolsuper
+               and g.oid <> (select relowner from pg_class where oid = 'public.bride'::regclass)) then
+    raise exception 'FAIL: a role other than the migration role is a member of portal_owner or portal_reader: %',
+      (select string_agg(g.rolname || ' in ' || t.portal, ', ')
+       from pg_roles g, (values ('portal_owner'), ('portal_reader')) t(portal)
+       where pg_has_role(g.oid, t.portal::regrole, 'MEMBER') and g.rolname <> t.portal
+         and not g.rolsuper
+         and g.oid <> (select relowner from pg_class where oid = 'public.bride'::regclass));
+  end if;
+  if exists (select 1 from pg_class c where c.relowner in ('portal_owner'::regrole, 'portal_reader'::regrole)) then
+    raise exception 'FAIL: a portal role owns a relation (RLS would not apply to it)';
+  end if;
+  if has_schema_privilege('portal_owner', 'public', 'CREATE')
+     or has_schema_privilege('portal_reader', 'public', 'CREATE') then
+    raise exception 'FAIL: a portal role holds CREATE on schema public';
+  end if;
+  raise notice 'PASS: portal_owner and portal_reader are unprivileged, member of nothing, own no relation';
+end $$;
+
+-- ---------- shape: the three functions ----------
+do $$
+declare f record; grantees text;
+begin
+  for f in
+    select p.oid, p.oid::regprocedure::text as sig, p.prosecdef, p.provolatile, p.proconfig,
+           p.proowner::regrole::text as owner
+    from pg_proc p
+    where p.oid in ('public.portal_resolve_token(bytea,uuid)'::regprocedure,
+                    'public.portal_sessions(bytea,uuid)'::regprocedure,
+                    'public.portal_rate_limit_hit(bytea,bytea,integer)'::regprocedure)
+  loop
+    if not f.prosecdef then raise exception 'FAIL: % is not SECURITY DEFINER', f.sig; end if;
+    if f.owner <> 'portal_owner' then
+      raise exception 'FAIL: % is owned by %, expected portal_owner (never a BYPASSRLS role)', f.sig, f.owner;
+    end if;
+    if f.provolatile <> 'v' then raise exception 'FAIL: % is not VOLATILE (it writes)', f.sig; end if;
+    -- pg_temp named LAST: with search_path = '' Postgres still searches
+    -- pg_temp first for types and relations, which let portal_reader's temp
+    -- domains run code as portal_owner (security review of #61). The
+    -- behavioural regression test is at the end of this section.
+    if f.proconfig is null or not ('search_path=pg_catalog, pg_temp' = any (f.proconfig)) then
+      raise exception 'FAIL: % does not set search_path = pg_catalog, pg_temp (got %)', f.sig, f.proconfig;
+    end if;
+    -- EXECUTE: portal_reader and the owner, nobody else, PUBLIC included
+    select string_agg(distinct case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end, ',')
+      into grantees
+    from aclexplode((select proacl from pg_proc where oid = f.oid)) a
+    where a.privilege_type = 'EXECUTE' and a.grantee <> 'portal_owner'::regrole;
+    if grantees is distinct from 'portal_reader' then
+      raise exception 'FAIL: % is executable by % (expected portal_reader only)', f.sig, grantees;
+    end if;
+  end loop;
+
+  -- portal_sessions returns the seven-column portal surface and nothing else
+  if (select string_agg(column_name, ',' order by ordinal_position)
+      from information_schema.columns
+      where table_schema = 'public' and table_name = 'portal_session_view')
+     <> 'id,bride_id,order_index,scheduled_at,duration_minutes,location,status'
+     or (select prorettype from pg_proc where oid = 'public.portal_sessions(bytea,uuid)'::regprocedure)
+        <> 'public.portal_session_view'::regtype then
+    raise exception 'FAIL: portal_sessions does not return portal_session_view''s seven columns';
+  end if;
+  -- no private field name anywhere in either lookup's signature
+  if exists (select 1 from pg_proc p, unnest(p.proargnames) n
+             where p.oid in ('public.portal_resolve_token(bytea,uuid)'::regprocedure,
+                             'public.portal_sessions(bytea,uuid)'::regprocedure)
+               and n in ('private_note', 'needs_review_note', 'covered_topic_ids')) then
+    raise exception 'FAIL: a portal function exposes a private field';
+  end if;
+  raise notice 'PASS: portal functions are VOLATILE SECURITY DEFINER, owned by portal_owner, executable by portal_reader only';
+end $$;
+
+-- ---------- containment: service_role and portal_reader hold nothing in public ----------
+-- Every relation, sequence and function, whichever migration made it.
+do $$
+declare r record; role text;
+  allowed_fn regprocedure[] := array[
+    'public.portal_resolve_token(bytea,uuid)'::regprocedure,
+    'public.portal_sessions(bytea,uuid)'::regprocedure,
+    'public.portal_rate_limit_hit(bytea,bytea,integer)'::regprocedure];
+begin
+  foreach role in array array['service_role', 'portal_reader'] loop
+    for r in
+      select c.oid::regclass as obj, c.relkind
+      from pg_class c
+      where c.relnamespace = 'public'::regnamespace
+        and c.relkind in ('r','p','v','m','f','S')
+    loop
+      if r.relkind = 'S' then
+        if has_sequence_privilege(role, r.obj, 'USAGE,SELECT,UPDATE') then
+          raise exception 'FAIL: % holds a privilege on sequence %', role, r.obj;
+        end if;
+      elsif has_table_privilege(role, r.obj, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+            or has_any_column_privilege(role, r.obj, 'SELECT,INSERT,UPDATE,REFERENCES') then
+        raise exception 'FAIL: % holds a privilege on %', role, r.obj;
+      end if;
+    end loop;
+    for r in
+      select p.oid::regprocedure as fn
+      from pg_proc p
+      where p.pronamespace = 'public'::regnamespace and p.prokind in ('f','p')
+        and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass
+                        and d.objid = p.oid and d.deptype = 'e')   -- extension members
+    loop
+      if has_function_privilege(role, r.fn, 'EXECUTE')
+         and not (role = 'portal_reader' and r.fn = any (allowed_fn)) then
+        raise exception 'FAIL: % can execute %', role, r.fn;
+      end if;
+    end loop;
+  end loop;
+
+  -- the acceptance criterion, literally
+  if has_column_privilege('service_role', 'public.bride', 'phone', 'SELECT')
+     or has_any_column_privilege('service_role', 'public.session_record', 'SELECT')
+     or has_any_column_privilege('service_role', 'public.payment', 'SELECT')
+     or has_any_column_privilege('service_role', 'public.course', 'SELECT') then
+    raise exception 'FAIL: service_role can read bride.phone, session_record, payment or course';
+  end if;
+  raise notice 'PASS: service_role holds nothing in public; portal_reader holds EXECUTE on exactly three functions';
+end $$;
+
+-- ---------- containment: portal_owner holds exactly the portal's needs ----------
+do $$
+declare r record; want text;
+begin
+  for r in
+    select c.oid::regclass as obj, c.relname, c.relkind
+    from pg_class c
+    where c.relnamespace = 'public'::regnamespace and c.relkind in ('r','p','v','m','f','S')
+  loop
+    -- table-level: SELECT on the two views, INSERT on access_log, the counter
+    want := case r.relname
+              when 'portal_bride_view'   then 'SELECT'
+              when 'portal_session_view' then 'SELECT'
+              when 'access_log'          then 'INSERT'
+              when 'portal_rate_limit'   then 'SELECT,INSERT,UPDATE'
+              else null end;
+    if r.relkind = 'S' then
+      if has_sequence_privilege('portal_owner', r.obj, 'USAGE,SELECT,UPDATE') then
+        raise exception 'FAIL: portal_owner holds a privilege on sequence %', r.obj;
+      end if;
+      continue;
+    end if;
+    if want is null then
+      if has_table_privilege('portal_owner', r.obj, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+        raise exception 'FAIL: portal_owner holds a table-level privilege on %', r.obj;
+      end if;
+      if r.relname not in ('bride', 'session', 'course')
+         and has_any_column_privilege('portal_owner', r.obj, 'SELECT,INSERT,UPDATE,REFERENCES') then
+        raise exception 'FAIL: portal_owner holds a column privilege on %', r.obj;
+      end if;
+    else
+      if not has_table_privilege('portal_owner', r.obj, want) then
+        raise exception 'FAIL: portal_owner lacks % on %', want, r.obj;
+      end if;
+      if has_table_privilege('portal_owner', r.obj, 'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+         or (r.relname <> 'portal_rate_limit' and has_table_privilege('portal_owner', r.obj, 'UPDATE'))
+         or (r.relname = 'access_log' and has_table_privilege('portal_owner', r.obj, 'SELECT')) then
+        raise exception 'FAIL: portal_owner holds more than % on %', want, r.obj;
+      end if;
+    end if;
+  end loop;
+
+  -- column-level on the base tables: exactly what the two views read
+  for r in
+    select a.attrelid::regclass::text as tbl, a.attname::text as col
+    from pg_attribute a
+    where a.attrelid in ('public.bride'::regclass, 'public.session'::regclass, 'public.course'::regclass)
+      and a.attnum > 0 and not a.attisdropped
+      and has_column_privilege('portal_owner', a.attrelid, a.attnum, 'SELECT')
+  loop
+    if (r.tbl, r.col) not in (
+         ('bride','id'), ('bride','tenant_id'), ('bride','first_name'), ('bride','portal_token_hash'),
+         ('bride','portal_expires_at'), ('bride','deleted_at'),
+         ('session','id'), ('session','course_id'), ('session','order_index'), ('session','scheduled_at'),
+         ('session','duration_minutes'), ('session','location'), ('session','status'), ('session','deleted_at'),
+         ('course','id'), ('course','bride_id'), ('course','deleted_at')) then
+      raise exception 'FAIL: portal_owner can SELECT %.%', r.tbl, r.col;
+    end if;
+  end loop;
+  if has_any_column_privilege('portal_owner', 'public.session_record', 'SELECT') then
+    raise exception 'FAIL: portal_owner can read session_record';
+  end if;
+  raise notice 'PASS: portal_owner holds exactly the view columns, the counter, and INSERT on access_log';
+end $$;
+
+-- ---------- objects created later grant nothing to the contained roles ----------
+-- As the migration role (whose default privileges the bootstrap set to the
+-- platform's; scripts/test-schema.sh asserts that emulation was active).
+begin;
+select format('set local role %I', relowner::regrole)
+from pg_class where oid = 'public.bride'::regclass
+\gexec
+create table public.probe53 (id int primary key, secret text);
+create sequence public.probe53_seq;
+create view public.probe53_v with (security_invoker = on) as select id from public.probe53;
+create function public.probe53_fn() returns int language sql as 'select 1';
+do $$
+declare role text;
+begin
+  foreach role in array array['service_role', 'portal_reader', 'portal_owner', 'anon', 'authenticated'] loop
+    if has_table_privilege(role, 'public.probe53', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       or has_table_privilege(role, 'public.probe53_v', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       or has_any_column_privilege(role, 'public.probe53', 'SELECT,INSERT,UPDATE,REFERENCES') then
+      raise exception 'FAIL: a new table or view defaults to privileges for %', role;
+    end if;
+    if has_sequence_privilege(role, 'public.probe53_seq', 'USAGE,SELECT,UPDATE') then
+      raise exception 'FAIL: a new sequence defaults to privileges for %', role;
+    end if;
+    if has_function_privilege(role, 'public.probe53_fn()', 'EXECUTE') then
+      raise exception 'FAIL: a new function defaults to EXECUTE for % (directly or via PUBLIC)', role;
+    end if;
+  end loop;
+  raise notice 'PASS: objects created after 0008 grant nothing to service_role, portal_reader, portal_owner, anon or authenticated';
+end $$;
+rollback;
+
+-- ---------- the lookups, as portal_reader ----------
+set role portal_reader;
+set request.jwt.claims = '{}';
+do $$
+declare r record; n int;
+begin
+  -- right hash: exactly her row
+  select * into r from portal_resolve_token(sha256('tok-37-live'), '53000000-0000-4000-8000-000000000001');
+  if r.bride_id is distinct from 'a1000000-0000-4000-8000-000000000371'::uuid
+     or r.tenant_id is distinct from 'a0000000-0000-4000-8000-000000000001'::uuid
+     or r.first_name is distinct from 'Live' or r.portal_expires_at is null then
+    raise exception 'FAIL: portal_resolve_token did not resolve the live token (%)', r;
+  end if;
+  select count(*) into n from portal_resolve_token(sha256('tok-37-live'), '53000000-0000-4000-8000-000000000002');
+  if n <> 1 then raise exception 'FAIL: portal_resolve_token returned % rows for one token', n; end if;
+
+  -- wrong, expired, deleted, expiry-less: nothing, indistinguishably
+  select count(*) into n from portal_resolve_token(sha256('not-a-token'), '53000000-0000-4000-8000-000000000003');
+  if n <> 0 then raise exception 'FAIL: an unknown hash resolved'; end if;
+  select count(*) into n from portal_resolve_token(sha256('tok-37-expired'), '53000000-0000-4000-8000-000000000003');
+  if n <> 0 then raise exception 'FAIL: an expired link resolved'; end if;
+  select count(*) into n from portal_resolve_token(sha256('tok-37-deleted'), '53000000-0000-4000-8000-000000000003');
+  if n <> 0 then raise exception 'FAIL: a soft-deleted bride''s link resolved'; end if;
+  select count(*) into n from portal_resolve_token(sha256('tok-37-noexpiry'), '53000000-0000-4000-8000-000000000003');
+  if n <> 0 then raise exception 'FAIL: a link with no expiry resolved'; end if;
+
+  -- sessions: hers, live only, seven columns, in order
+  select count(*) into n from portal_sessions(sha256('tok-37-live'), '53000000-0000-4000-8000-000000000004');
+  if n <> 2 then raise exception 'FAIL: portal_sessions returned % rows, expected 2 (soft-deleted excluded)', n; end if;
+  if exists (select 1 from portal_sessions(sha256('tok-37-live'), '53000000-0000-4000-8000-000000000005') s
+             where s.bride_id <> 'a1000000-0000-4000-8000-000000000371') then
+    raise exception 'FAIL: portal_sessions returned another bride''s session';
+  end if;
+  if (select string_agg(s.order_index::text, ',' order by s.ord)
+      from portal_sessions(sha256('tok-37-live'), '53000000-0000-4000-8000-000000000005')
+           with ordinality s(id, bride_id, order_index, scheduled_at, duration_minutes, location, status, ord))
+     is distinct from '1,2' then
+    raise exception 'FAIL: portal_sessions is not ordered by order_index';
+  end if;
+  -- a resolvable bride with no course: zero sessions, but the read happened
+  select count(*) into n from portal_sessions(sha256('tok-37-b-live'), '53000000-0000-4000-8000-000000000006');
+  if n <> 0 then raise exception 'FAIL: tenant B''s course-less bride returned % sessions', n; end if;
+  select count(*) into n from portal_sessions(sha256('not-a-token'), '53000000-0000-4000-8000-000000000007');
+  if n <> 0 then raise exception 'FAIL: portal_sessions resolved an unknown hash'; end if;
+
+  -- malformed input is refused, not looked up
+  begin
+    perform * from portal_resolve_token(null, '53000000-0000-4000-8000-000000000008');
+    raise exception 'FAIL: portal_resolve_token accepted a NULL hash';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_resolve_token('\xdeadbeef'::bytea, '53000000-0000-4000-8000-000000000008');
+    raise exception 'FAIL: portal_resolve_token accepted a 4-byte hash';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_resolve_token(sha256('tok-37-live') || '\x00'::bytea, '53000000-0000-4000-8000-000000000008');
+    raise exception 'FAIL: portal_resolve_token accepted a 33-byte hash';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_resolve_token(sha256('tok-37-live'), null);
+    raise exception 'FAIL: portal_resolve_token accepted a NULL request id';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_sessions(null, '53000000-0000-4000-8000-000000000008');
+    raise exception 'FAIL: portal_sessions accepted a NULL hash';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_sessions(substring(sha256('tok-37-live') from 1 for 8), '53000000-0000-4000-8000-000000000008');
+    raise exception 'FAIL: portal_sessions accepted an 8-byte hash prefix';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform * from portal_sessions(sha256('tok-37-live'), null);
+    raise exception 'FAIL: portal_sessions accepted a NULL request id';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- and nothing else is reachable
+  begin perform phone from bride;                   raise exception 'FAIL: portal_reader read bride.phone';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from portal_bride_view;           raise exception 'FAIL: portal_reader read portal_bride_view';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from portal_session_view;         raise exception 'FAIL: portal_reader read portal_session_view';
+  exception when insufficient_privilege then null; end;
+  begin perform private_note from session_record;   raise exception 'FAIL: portal_reader read session_record';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from payment;                     raise exception 'FAIL: portal_reader read payment';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from access_log;                  raise exception 'FAIL: portal_reader read access_log';
+  exception when insufficient_privilege then null; end;
+  begin
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('a0000000-0000-4000-8000-000000000001', 'bride_portal',
+            'a1000000-0000-4000-8000-000000000371', 'a1000000-0000-4000-8000-000000000371', 'read', 'forged');
+    raise exception 'FAIL: portal_reader inserted into access_log directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin perform portal_rate_limit_prune();          raise exception 'FAIL: portal_reader executed portal_rate_limit_prune';
+  exception when insufficient_privilege then null; end;
+  begin perform * from read_session_records(array['a3000000-0000-4000-8000-000000000531'::uuid], null);
+    raise exception 'FAIL: portal_reader executed read_session_records';
+  exception when insufficient_privilege then null; end;
+
+  raise notice 'PASS: portal lookups resolve by hash only, refuse malformed input, and reach nothing else';
+end $$;
+reset role;
+
+-- ---------- the lookups log themselves: one row per success, none on failure ----------
+do $$
+declare n int; r record;
+begin
+  -- 001, 002: one resolve each
+  for r in select * from (values
+      ('53000000-0000-4000-8000-000000000001', 1, 'portal_resolve_token'),
+      ('53000000-0000-4000-8000-000000000002', 1, 'portal_resolve_token'),
+      ('53000000-0000-4000-8000-000000000003', 0, null),   -- four failed resolves
+      ('53000000-0000-4000-8000-000000000004', 1, 'portal_sessions'),
+      ('53000000-0000-4000-8000-000000000005', 2, 'portal_sessions'),  -- two calls under one id
+      ('53000000-0000-4000-8000-000000000006', 1, 'portal_sessions'),  -- resolved, zero sessions
+      ('53000000-0000-4000-8000-000000000007', 0, null),   -- failed sessions lookup
+      ('53000000-0000-4000-8000-000000000008', 0, null)    -- malformed input
+    ) t(req, want, resource)
+  loop
+    select count(*) into n from access_log where request_id = r.req;
+    if n <> r.want then
+      raise exception 'FAIL: request % wrote % access_log rows, expected %', r.req, n, r.want;
+    end if;
+    if r.want > 0 and exists (
+         select 1 from access_log l
+         where l.request_id = r.req
+           and not (l.actor_kind = 'bride_portal' and l.actor_id = l.bride_id
+                    and l.action = 'read' and l.resource = r.resource)) then
+      raise exception 'FAIL: request % wrote a row that is not (bride_portal, %)', r.req, r.resource;
+    end if;
+  end loop;
+
+  -- attributed to the right bride and tenant
+  if exists (select 1 from access_log
+             where request_id in ('53000000-0000-4000-8000-000000000001', '53000000-0000-4000-8000-000000000004')
+               and (bride_id <> 'a1000000-0000-4000-8000-000000000371'
+                    or tenant_id <> 'a0000000-0000-4000-8000-000000000001')) then
+    raise exception 'FAIL: a portal log row names the wrong bride or tenant';
+  end if;
+  if not exists (select 1 from access_log
+                 where request_id = '53000000-0000-4000-8000-000000000006'
+                   and bride_id = 'b1000000-0000-4000-8000-000000000371'
+                   and tenant_id = 'b0000000-0000-4000-8000-000000000002') then
+    raise exception 'FAIL: tenant B''s portal read was not logged against tenant B';
+  end if;
+  raise notice 'PASS: each successful portal lookup writes exactly one (bride_portal) row; failures write none';
+end $$;
+
+-- ---------- portal_owner may append only an honest bride_portal row ----------
+set role portal_owner;
+do $$
+begin
+  begin
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('a0000000-0000-4000-8000-000000000001', 'support',
+            'a1000000-0000-4000-8000-000000000371', 'a1000000-0000-4000-8000-000000000371', 'read', 'forged');
+    raise exception 'FAIL: portal_owner wrote a support row';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('a0000000-0000-4000-8000-000000000001', 'instructor',
+            'a0000000-0000-4000-8000-000000000001', 'a1000000-0000-4000-8000-000000000371', 'read', 'forged');
+    raise exception 'FAIL: portal_owner wrote an instructor row';
+  exception when insufficient_privilege then null;
+  end;
+  begin  -- right bride, wrong tenant
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('b0000000-0000-4000-8000-000000000002', 'bride_portal',
+            'a1000000-0000-4000-8000-000000000371', 'a1000000-0000-4000-8000-000000000371', 'read', 'forged');
+    raise exception 'FAIL: portal_owner logged tenant A''s bride under tenant B';
+  exception when insufficient_privilege then null;
+  end;
+  begin  -- actor is not the bride
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('a0000000-0000-4000-8000-000000000001', 'bride_portal',
+            'a0000000-0000-4000-8000-000000000001', 'a1000000-0000-4000-8000-000000000371', 'read', 'forged');
+    raise exception 'FAIL: portal_owner wrote a bride_portal row attributed to someone else';
+  exception when insufficient_privilege then null;
+  end;
+  begin  -- a bride without a live token is not a portal reader
+    insert into access_log (tenant_id, actor_kind, actor_id, bride_id, action, resource)
+    values ('a0000000-0000-4000-8000-000000000001', 'bride_portal',
+            'a1000000-0000-4000-8000-000000000001', 'a1000000-0000-4000-8000-000000000001', 'read', 'forged');
+    raise exception 'FAIL: portal_owner logged a bride with no portal token';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform 1 from access_log;
+    raise exception 'FAIL: portal_owner read access_log';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from access_log;
+    raise exception 'FAIL: portal_owner deleted from access_log';
+  exception when insufficient_privilege then null;
+  end;
+  raise notice 'PASS: portal_owner can append only (bride_portal, bride) rows for a live portal bride, and cannot read or erase the log';
+end $$;
+reset role;
+
+-- ---------- portal_session_view still respects its caller's RLS ----------
+-- The core section can no longer read the view as an instructor (0008 removed
+-- every direct grant). security_invoker is still mandatory (SDD §4.2), so the
+-- property it buys is asserted under a temporary grant, rolled back.
+begin;
+grant select on public.portal_session_view to authenticated;
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"a0000000-0000-4000-8000-000000000001"}';
+do $$
+declare n int;
+begin
+  select count(*) into n from portal_session_view where bride_id = 'b1000000-0000-4000-8000-000000000001';
+  if n <> 0 then raise exception 'FAIL: portal_session_view leaked tenant B rows under RLS'; end if;
+  select count(*) into n from portal_session_view where bride_id = 'a1000000-0000-4000-8000-000000000001';
+  if n = 0 or n <> (select count(*) from session s join course c on c.id = s.course_id
+                    where c.bride_id = 'a1000000-0000-4000-8000-000000000001'
+                      and s.deleted_at is null and c.deleted_at is null) then
+    raise exception 'FAIL: portal_session_view hid tenant A''s own rows (% rows)', n;
+  end if;
+  raise notice 'PASS: portal_session_view (security_invoker) still applies the caller''s RLS';
+end $$;
+rollback;
+-- ---------- search_path: temp objects cannot hijack the definer functions ----------
+-- Security review of #61 (CRITICAL). portal_reader holds TEMP on the database
+-- through PUBLIC, and pg_temp is searched for type and relation names even
+-- when it is not listed — FIRST, unless search_path names it explicitly
+-- later. With `search_path = ''` a temp domain named `text` or `timestamptz`
+-- whose CHECK calls temp code made that code run as portal_owner. The fix is
+-- `search_path = pg_catalog, pg_temp` and schema-qualified types throughout.
+-- Here portal_reader plants a temp domain over every type name the functions
+-- could resolve at run time, each CHECK raising if it ever runs, and calls
+-- all three functions. Everything is rolled back.
+begin;
+set local role portal_reader;
+create function pg_temp.c53_evil() returns pg_catalog.bool language plpgsql as
+  $evil$ begin raise exception 'FAIL: temp code ran inside a portal function as %', current_user; end $evil$;
+create domain pg_temp.text        as pg_catalog.text        check (pg_temp.c53_evil());
+create domain pg_temp.timestamptz as pg_catalog.timestamptz check (pg_temp.c53_evil());
+create domain pg_temp.uuid        as pg_catalog.uuid        check (pg_temp.c53_evil());
+create domain pg_temp.bytea       as pg_catalog.bytea       check (pg_temp.c53_evil());
+create domain pg_temp.int4        as pg_catalog.int4        check (pg_temp.c53_evil());
+create domain pg_temp.int8        as pg_catalog.int8        check (pg_temp.c53_evil());
+create domain pg_temp.interval    as pg_catalog.interval    check (pg_temp.c53_evil());
+create domain pg_temp.jsonb       as pg_catalog.jsonb       check (pg_temp.c53_evil());
+-- a temp relation shadowing the base tables and views by name
+create temp table bride (id pg_catalog.uuid);
+create temp table access_log (id pg_catalog.int8);
+create temp table portal_bride_view (id pg_catalog.uuid);
+create temp table portal_rate_limit (hits pg_catalog.int4);
+select pg_catalog.count(*) as c53_resolved
+from public.portal_resolve_token(pg_catalog.sha256('tok-37-live'::pg_catalog.bytea),
+                                 '53000000-0000-4000-8000-000000000101') \gset
+select pg_catalog.count(*) as c53_sessions
+from public.portal_sessions(pg_catalog.sha256('tok-37-live'::pg_catalog.bytea),
+                            '53000000-0000-4000-8000-000000000102') \gset
+select r.ip_hits is null and r.token_hash_prefix_hits = 1 as c53_hit_ok
+from public.portal_rate_limit_hit(null, '\x0102030405060708'::pg_catalog.bytea, 60) r \gset
+rollback;
+select (:c53_resolved = 1 and :c53_sessions = 2 and :'c53_hit_ok'::pg_catalog.bool) as c53_ok \gset
+\if :c53_ok
+\echo 'PASS: temp domains and temp tables planted by portal_reader do not reach the portal functions'
+\else
+\echo 'resolved=' :c53_resolved ' sessions=' :c53_sessions ' hit_ok=' :c53_hit_ok
+do $$ begin raise exception 'FAIL: portal functions misbehaved under planted temp objects (see the line above)'; end $$;
+\endif
+-- =============================================================
+-- END #53
 -- =============================================================

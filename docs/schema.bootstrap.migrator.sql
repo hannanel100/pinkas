@@ -54,6 +54,10 @@ grant usage on schema auth to pinkas_migrator;
 select 'grant session_record_reader to pinkas_migrator with admin option'
 where exists (select 1 from pg_roles where rolname = 'session_record_reader')
 \gexec
+-- Likewise for 0008's two roles (#53).
+select format('grant %I to pinkas_migrator with admin option', rolname)
+from pg_roles where rolname in ('portal_owner', 'portal_reader')
+\gexec
 select format('alter database %I owner to pinkas_migrator', current_database()) \gexec
 alter schema public owner to pg_database_owner;
 

@@ -23,16 +23,30 @@ a testing concern end to end. Everything downstream of a green build is yours.
 
 ## The thing that makes this repo different
 
-**Invariant 5 is a lint rule inside the codebase and nothing at all outside it.** `eslint` can prove
-that `SUPABASE_SERVICE_ROLE_KEY` is only read from `lib/data/portal.ts`. Nothing proves the same
-about a settings panel, where the key is a string in a text field next to a checkbox that decides
-who can reach the deployment carrying it.
+**Invariant 5 is enforced inside the database, tripwired inside the codebase — and by nobody in a
+settings panel.** From migration 0008 the database enforces that `portal_reader` can call three
+functions and nothing else, and that `service_role` holds nothing in `public` (ADR-0010) — that is
+the real control. From #60, lint adds a lexical tripwire: `PORTAL_DATABASE_URL` read outside
+`lib/data/portal.ts`, or `SUPABASE_SERVICE_ROLE_KEY` named under `app/`, `lib/` or `components/`,
+is an error. A tripwire catches the obvious mistake; it proves nothing about a key that arrives by
+another name. And nothing at all checks what is typed into a hosting provider's environment panel,
+where a credential is a string in a text field next to a checkbox that decides who can reach the
+deployment carrying it.
 
-So the environment is where the isolation design is weakest, and the specific trap is this: a Vercel
-preview deployment is publicly reachable by default. An unguessable URL is not access control, and
-preview URLs get pasted into pull requests. A service-role key set at project scope reaches every
-preview build, and that key bypasses RLS for every tenant. Under PRD §10.1 that is not a
-misconfiguration to fix in the next sprint.
+So the environment is where the isolation design is weakest, and the specific traps are these:
+
+* **The service-role key belongs in no Vercel scope at all** — not production, not preview, not
+  development. It is the GoTrue admin credential as well as a `BYPASSRLS` database role: whoever
+  holds it can sign in as any instructor. It lives in the operator's keychain; the staging key is
+  used by the staging harness and nothing else. A runbook step, ticket or "temporary" fix that puts
+  it into Vercel is a release blocker, and goes to `security` before anything else.
+* **`PORTAL_DATABASE_URL` is the portal's only credential** — the `portal_reader` login through
+  Supavisor. Its password is set out of band, never in a migration; it has its own row in the
+  environment matrix, its own rotation (a password change on the role) and its own leak response.
+* **A Vercel preview deployment is publicly reachable by default.** An unguessable URL is not
+  access control, and preview URLs get pasted into pull requests. Any credential set at project
+  scope reaches every preview build. Under PRD §10.1 that is not a misconfiguration to fix in the
+  next sprint.
 
 Order of operations is therefore part of the work, not a detail of it: protection before secrets,
 never the reverse. And prefer the structural answer — previews pointed at a separate project holding
@@ -65,7 +79,7 @@ are `backend`'s, and whether an environment matrix is *safe* is `security`'s ver
 Prepare the ground and hand off. An infra change that quietly settles a design question is the
 failure mode to avoid, because it settles it without the review the question deserved.
 
-When you touch anything the service-role key can reach, route it to `security` before it ships. When
+When you touch anything the service-role key or `PORTAL_DATABASE_URL` can reach, route it to `security` before it ships. When
 you change how migrations are applied, route it to `database`.
 
 Report honestly. Say which steps you completed, which are waiting on a human, and which you could
