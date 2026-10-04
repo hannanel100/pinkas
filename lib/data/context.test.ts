@@ -76,6 +76,27 @@ describe("resolver — requireInstructorContext", () => {
     expect(fake.rpcs).toHaveLength(0);
   });
 
+  it.each([
+    ["app_metadata", { app_metadata: { provider: "phone", impersonated_by: ENGINEER } }],
+    ["user_metadata", { user_metadata: { impersonated_by: ENGINEER } }],
+    ["user_metadata, junk value", { user_metadata: { impersonated_by: "" } }],
+  ])("refuses impersonated_by nested in %s (#60 review)", async (_where, extra) => {
+    fake.claims = { sub: TENANT, role: "authenticated", ...extra };
+    await expect(readTwo([BRIDE_A])).rejects.toBeInstanceOf(ImpersonationRefusedError);
+    expect(fake.queries).toHaveLength(0);
+    expect(fake.rpcs).toHaveLength(0);
+  });
+
+  it("does not refuse ordinary metadata", async () => {
+    fake.claims = {
+      sub: TENANT,
+      role: "authenticated",
+      app_metadata: { provider: "phone" },
+      user_metadata: { full_name: "x" },
+    };
+    await expect(readTwo([BRIDE_A])).resolves.toHaveLength(1);
+  });
+
   it("refuses impersonated_by even when its value is junk", async () => {
     fake.claims = { sub: TENANT, role: "authenticated", impersonated_by: null };
     await expect(readTwo([BRIDE_A])).rejects.toBeInstanceOf(ImpersonationRefusedError);
@@ -174,6 +195,30 @@ describe("defineRead — none and database", () => {
       return ctx.loggedRpc("today_screen", { p_today: ctx.today });
     },
   );
+
+  it("'none' is refused for any resource but instructor — the #60 review's probe throws", () => {
+    // The reviewer's probe, verbatim in shape: an unlogged "none" read of bride.
+    expect(() =>
+      defineRead({ resource: "bride", subjects: "none" }, async (ctx) =>
+        (await ctx.db.from("bride").select("*")).data,
+      ),
+    ).toThrow(AuditViolationError);
+    for (const resource of ["bride_card", "course", "schedule", "session", "session_record", "today_screen"] as const) {
+      expect(() => defineRead({ resource, subjects: "none" }, async () => null)).toThrow(AuditViolationError);
+      expect(() =>
+        defineMutation({ resource, action: "update", subjects: "none" }, async () => null),
+      ).toThrow(AuditViolationError);
+    }
+    expect(fake.queries).toHaveLength(0);
+  });
+
+  it("loggedRpc refuses any RPC that does not log itself, even when the type is cast away", async () => {
+    const sneaky = defineRead({ resource: "today_screen", subjects: "database" }, async (ctx) =>
+      (ctx.loggedRpc as unknown as (n: string, a: object) => Promise<unknown>)("bootstrap_instructor", {}),
+    );
+    await expect(sneaky()).rejects.toBeInstanceOf(AuditViolationError);
+    expect(fake.rpcs).toHaveLength(0);
+  });
 
   it("'none' writes no access_log row", async () => {
     await expect(settings()).resolves.toEqual({ tenant: TENANT });

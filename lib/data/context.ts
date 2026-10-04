@@ -105,6 +105,26 @@ type SelfLoggingRpcs = {
 };
 export type SelfLoggingRpc = keyof SelfLoggingRpcs;
 
+/**
+ * The runtime twin of `SelfLoggingRpcs`. The type alone can be cast away —
+ * `(ctx.loggedRpc as any)("other_rpc")` would otherwise call an RPC that logs
+ * nothing, from a context that writes nothing (#60 review).
+ */
+const SELF_LOGGING_RPCS: ReadonlySet<string> = new Set<SelfLoggingRpc>([
+  "today_screen",
+  "read_session_records",
+]);
+
+/**
+ * Resources that may be declared `subjects: "none"` — i.e. that disclose no
+ * bride's data and so write no log row. A closed list, checked when the
+ * function is DEFINED, so a `"none"` read of `bride` fails at import time
+ * rather than quietly returning brides unlogged (#60 review).
+ */
+const NO_SUBJECT_RESOURCES: ReadonlySet<AccessResource> = new Set<AccessResource>([
+  "instructor",
+]);
+
 type BaseContext = {
   readonly tenantId: Uuid;
   readonly actor: Actor;
@@ -164,11 +184,30 @@ async function verifiedClaims(db: UserClient): Promise<Record<string, unknown> |
   return data.claims as Record<string, unknown>;
 }
 
+/**
+ * `impersonated_by` anywhere a support tool could put it: top level (a minted
+ * token or the access-token hook, ADR-0010 §4), or inside `app_metadata` /
+ * `user_metadata` (what `raw_app_meta_data` / `raw_user_meta_data` become in
+ * the JWT). Any of the three refuses the instructor path — a support read
+ * logged as hers is the misattribution SDD §16.2 forbids. An instructor who
+ * writes the key into her own `user_metadata` only locks herself out.
+ */
+function carriesImpersonation(claims: Record<string, unknown>): boolean {
+  if ("impersonated_by" in claims) return true;
+  for (const key of ["app_metadata", "user_metadata"] as const) {
+    const nested = claims[key];
+    if (nested !== null && typeof nested === "object" && "impersonated_by" in nested) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function requireInstructorContext(): Promise<Resolved> {
   const db = await createUserClient();
   const claims = await verifiedClaims(db);
   if (!claims || claims.role !== "authenticated") throw new NotAuthenticatedError();
-  if ("impersonated_by" in claims) throw new ImpersonationRefusedError();
+  if (carriesImpersonation(claims)) throw new ImpersonationRefusedError();
   const tenantId = parseUuid(claims.sub);
   if (!tenantId) throw new NotAuthenticatedError();
   return { db, tenantId, actor: { kind: "instructor", id: tenantId } };
@@ -193,6 +232,9 @@ function resolve(audience: Audience): Promise<Resolved> {
 
 function makeLoggedRpc(db: UserClient, requestId: RequestId): BaseContext["loggedRpc"] {
   return async (name, args) => {
+    if (!SELF_LOGGING_RPCS.has(name)) {
+      throw new AuditViolationError("loggedRpc: not a self-logging RPC.");
+    }
     const { data, error } = await db.rpc(name, { ...args, p_request_id: requestId });
     if (error) fail(`rpc.${name}`, error);
     return data;
@@ -221,6 +263,9 @@ function wrap<S extends Subjects, A extends readonly unknown[], R>(
 ): Audited<A, R> {
   const audience: Audience = descriptor.audience ?? "instructor";
   const { resource, subjects } = descriptor;
+  if (subjects === "none" && !NO_SUBJECT_RESOURCES.has(resource)) {
+    throw new AuditViolationError(`${resource}: may not be declared subjects "none".`);
+  }
 
   const fn = async (...args: A): Promise<R> => {
     const { db, tenantId, actor } = await resolve(audience);
