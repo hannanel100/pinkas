@@ -145,6 +145,26 @@ const serviceKeySyntax = [
   { selector: `TemplateElement[value.raw=${SERVICE_KEY.toString()}]`, message: SERVICE_KEY_MESSAGE },
 ];
 
+/**
+ * Invariant 5 — PORTAL_DATABASE_URL is read in lib/data/portal.ts and nowhere
+ * else (ADR-0010 §1). Same three forms as the service-key ban above, applied
+ * to app/, lib/ and components/ with portal.ts the one exemption.
+ *
+ * Also a TRIPWIRE, not the control: concatenation or iterating `process.env`
+ * walks past a lexical rule. The control is ADR-0010 — the credential is a
+ * `portal_reader` login holding EXECUTE on the portal_* functions and nothing
+ * else, so code that reached it from elsewhere could still only call those
+ * functions, each of which looks up by token hash and logs its own read.
+ */
+const PORTAL_URL = /PORTAL_DATABASE_URL/;
+const PORTAL_URL_MESSAGE =
+  "PORTAL_DATABASE_URL is read in lib/data/portal.ts only (invariant 5, ADR-0010). Reach the portal through that module's functions.";
+const portalUrlSyntax = [
+  { selector: `Identifier[name=${PORTAL_URL.toString()}]`, message: PORTAL_URL_MESSAGE },
+  { selector: `Literal[value=${PORTAL_URL.toString()}]`, message: PORTAL_URL_MESSAGE },
+  { selector: `TemplateElement[value.raw=${PORTAL_URL.toString()}]`, message: PORTAL_URL_MESSAGE },
+];
+
 /** Invariant 4 — `today` is injected, never read from the clock. SDD §2.4. */
 const noClockSyntax = [
   {
@@ -391,6 +411,7 @@ const eslintConfig = defineConfig([
         ...colourSyntax,
         ...riskTokenSyntax,
         ...serviceKeySyntax,
+        ...portalUrlSyntax,
       ],
     },
   },
@@ -406,6 +427,7 @@ const eslintConfig = defineConfig([
         ...copySyntax,
         ...colourSyntax,
         ...serviceKeySyntax,
+        ...portalUrlSyntax,
       ],
     },
   },
@@ -415,7 +437,16 @@ const eslintConfig = defineConfig([
     // composes the same fragment in its own block below.
     name: "pinkas/lib-syntax",
     files: ["lib/**/*.{ts,tsx,mts}"],
-    ignores: ["lib/domain/**"],
+    ignores: ["lib/domain/**", "lib/data/portal.ts"],
+    rules: {
+      "no-restricted-syntax": ["error", ...serviceKeySyntax, ...portalUrlSyntax],
+    },
+  },
+  {
+    // The one file that may name PORTAL_DATABASE_URL. The service-key ban
+    // still applies to it.
+    name: "pinkas/portal-module-syntax",
+    files: ["lib/data/portal.ts"],
     rules: {
       "no-restricted-syntax": ["error", ...serviceKeySyntax],
     },
@@ -425,7 +456,12 @@ const eslintConfig = defineConfig([
     name: "pinkas/domain-is-pure",
     files: ["lib/domain/**/*.ts"],
     rules: {
-      "no-restricted-syntax": ["error", ...noClockSyntax, ...serviceKeySyntax],
+      "no-restricted-syntax": [
+        "error",
+        ...noClockSyntax,
+        ...serviceKeySyntax,
+        ...portalUrlSyntax,
+      ],
       "no-restricted-imports": [
         "error",
         {
