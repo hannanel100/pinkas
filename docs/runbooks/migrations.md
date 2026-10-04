@@ -197,6 +197,14 @@ to `service_role` is deliberately kept (reasoning in `0005`'s header). The
 `#31` section of `schema.test.sql` enumerates every object in `public`, so a
 migration that breaks this fails CI.
 
+> **Changes with 0008 ([ADR-0010](../adr/0010-portal-database-login.md)).**
+> The portal path stops being `service_role`. From 0008 it is `portal_reader`,
+> which gets `EXECUTE` on the `portal_*` functions and nothing else. Every
+> `service_role` grant in `public`, and its default privileges there, are
+> revoked. A migration written after 0008 grants nothing to `service_role`,
+> and nothing to `portal_reader` beyond a new `portal_*` function. 0008
+> rewrites this paragraph.
+
 ## The platform-object allowlist (decided under #31)
 
 A hosted project injects objects into `public` that no migration creates —

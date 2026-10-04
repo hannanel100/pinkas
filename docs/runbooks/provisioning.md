@@ -33,6 +33,14 @@ leaks nothing, structurally.
 
 ## Order of operations: protection before secrets
 
+> **The production service-role key no longer goes into Vercel at all**
+> ([ADR-0010](../adr/0010-portal-database-login.md), #53). The portal uses
+> `PORTAL_DATABASE_URL` (a dedicated `portal_reader` login) plus
+> `PORTAL_SESSION_KEY` ([ADR-0011](../adr/0011-portal-link-in-the-fragment.md),
+> #54). The service key stays in the operator's keychain. The ordering below,
+> and Phase B step 5, still describe the old design until `infra`'s sub-ticket
+> of #53 rewrites them together with [vercel.md](./vercel.md) step 12.
+
 Staging URL and anon key may enter Vercel preview/development scopes once
 deployment protection is proven on a preview. The **production** service-role
 key enters the Vercel production scope **last**, and only after:
@@ -179,6 +187,8 @@ project is a standing credential with nothing to protect yet.
    scope only, after deployment protection is proven, `security` has signed
    off on the environment matrix as applied, and `lib/data/portal.ts` is
    deployed — [vercel.md](./vercel.md#human-checklist) steps 11–12.
+   **Superseded for the service-role key — see the note under "Order of
+   operations".** Do not put it in Vercel.
 6. **Restore drill** — before real bride data arrives, perform one PITR
    restore of the prod project to a scratch project and diff the schema
    (SDD §16.1: an untested backup is not a backup). Record the date here.

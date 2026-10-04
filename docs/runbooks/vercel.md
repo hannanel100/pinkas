@@ -12,6 +12,21 @@ are [portal-edge.md](./portal-edge.md).
 
 ## Decisions
 
+> **Being superseded — do not follow the service-role steps below as written.**
+> [ADR-0010](../adr/0010-portal-database-login.md) (#53, settled 2026-10-04)
+> takes `SUPABASE_SERVICE_ROLE_KEY` out of **every** Vercel scope, production
+> included. The portal reads through a dedicated Postgres login instead:
+> **`PORTAL_DATABASE_URL`**, production scope only, with a password set out of
+> band. [ADR-0011](../adr/0011-portal-link-in-the-fragment.md) (#54) adds
+> **`PORTAL_SESSION_KEY`**, the session-cookie MAC key. It is long-lived, as
+> sensitive as the database, kept out of preview and development scopes, and
+> rotated with two keys accepted at once. The matrix rows and step 12 below
+> still describe the old design. Rewriting them is the `infra` sub-ticket of
+> #53, which also adds both new names to `SECRET_VARS` in
+> `scripts/check-client-bundle.sh`. Until that lands, **the production
+> service-role key does not enter Vercel at all**: step 12 is suspended, not
+> merely deferred.
+
 | Decision | Choice | Why |
 |---|---|---|
 | Function region | `fra1` (Frankfurt), pinned in `vercel.json` | Co-located with Supabase `eu-central-1` (SDD §16.6). Every Today render crosses this link; §18.1's 2s budget assumes it is short. |
@@ -64,6 +79,11 @@ with **Preview** scope restricted to a single named branch, never to all
 previews.
 
 ## Environment matrix
+
+> **Stale rows — see the note under "Decisions".** The `SUPABASE_SERVICE_ROLE_KEY`
+> production cell is replaced by `PORTAL_DATABASE_URL` (ADR-0010), and a
+> `PORTAL_SESSION_KEY` row is missing (ADR-0011). `infra`'s sub-ticket of #53
+> rewrites this table.
 
 This is the authoritative matrix. Every "absent" is deliberate. Changing any
 cell is a `security`-reviewed act, recorded on the ticket that changes it.
@@ -227,7 +247,12 @@ secret, it names the dashboard field it goes into.
 > deployment listed has a git commit on `main` as its source. Record the check
 > on #28. Any exception is investigated before the key goes in.
 
-12. **Last of all.** Preconditions, all recorded on #28: `lib/data/portal.ts`
+12. **Suspended — see the note under "Decisions".** ADR-0010 removes the
+    service-role key from production; this step will be rewritten by
+    `infra` to set `PORTAL_DATABASE_URL` and `PORTAL_SESSION_KEY` instead. Do
+    not perform it as written.
+
+    *Original text, kept until the rewrite:* **Last of all.** Preconditions, all recorded on #28: `lib/data/portal.ts`
     (#7) is merged; the runtime sentinel test for per-request output exists
     and is green ("What the client-bundle check does not cover", above);
     the hard rule check above is done; and `security` has signed off. Then:
