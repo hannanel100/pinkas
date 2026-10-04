@@ -4,6 +4,8 @@
 **Relates to:** SDD §2.3, §13
 
 > **Qualified by [ADR-0009](./0009-session-record-column-revoke.md).** "Complete by construction" holds for this codebase, not for the deployment: PostgREST, the dashboard SQL editor and the service-role key are other ways in. ADR-0009 records how the private columns are closed against them. The text below is unchanged, as the record of what was decided.
+>
+> **Amended by [ADR-0010](./0010-portal-database-login.md), effective from migration 0008.** The service role no longer exists in either place named under "Note on defence in depth": the portal path uses a dedicated `portal_reader` login with `EXECUTE` only on hash-keyed definer functions, and the service-role key is in no deployed environment. Portal reads are logged inside those functions, not by `audit.logAccess`; from migration 0009, instructor-path rows are written through the `log_access` definer function, and `authenticated` cannot insert into `access_log` directly.
 
 ## Context
 

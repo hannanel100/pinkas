@@ -8,6 +8,14 @@ here is settled until that review is recorded on #40.
 The portal link is a credential belonging to a named woman. The consequences
 of it leaking are hers.
 
+> **The link format is changing — [ADR-0011](../adr/0011-portal-link-in-the-fragment.md)
+> (settled 2026-10-04, #54).** The link becomes `/p#<token>`. The token sits in
+> the fragment, which never reaches the host, and is exchanged by
+> `POST /p/session` for a session cookie. `/p/<anything>` becomes a 404. Until
+> #54 ships, everything below describes the deployed `/p/<token>` shape. Where
+> a rule changes when it ships, the section says so. No real link is issued
+> under the old shape (#54 blocks #7).
+
 ## 1. Edge rate limiting on `/p/*`
 
 ### Layering
@@ -44,6 +52,17 @@ Two rules, both on the condition **Request Path starts with `/p/`**, counted
 
 If the plan does not offer a 600 s window, use the longest offered and scale the
 limit to keep the same rate (12 per minute averaged).
+
+**When ADR-0011 ships, the condition changes.** "Starts with `/p/`" does not
+match `/p` itself, and `/p` is where every portal page is served after the
+change. Both rules must match **Request Path equals `/p` OR starts with
+`/p/`**. A third, stricter rule is added on **`POST /p/session`**, the only
+request that carries a token. The owner's approach proposed about 10 per
+minute per IP; `infra` sets the number against the envelope below. The
+envelope changes too: a bride's open becomes three requests (`GET /p`,
+`POST /p/session`, `GET /p` after the 303), and a preview fetch becomes one
+`GET /p`, which never touches the database. Re-check the burst limit against
+that before publishing.
 
 ### Why these numbers — the legitimate envelope
 
@@ -118,6 +137,27 @@ paths:
 
 SDD §6.3 handles third parties and referrers. It does not handle the host. This
 section does.
+
+### After ADR-0011 ships: not applicable — the token never reaches the host
+
+Once the link is `/p#<token>`, the token is never in a request line. Browsers
+do not send the fragment. The exchange carries the token in a POST body, and
+request bodies are not logged. Every other request carries only the session
+cookie. **Nothing in this section's exposure list then records a token**, and
+the decision below lapses for links issued under the fragment scheme.
+
+**The residual question: the cookie in a request header.** The `__Secure-p`
+cookie, which holds the token hash, its expiry and a MAC, is sent on every
+portal request. If any surface above logs request headers, a log reader learns
+a hash. The MAC stops that hash from becoming a session without
+`PORTAL_SESSION_KEY`. [ADR-0010](../adr/0010-portal-database-login.md) stops it
+from reaching the database without `PORTAL_DATABASE_URL`. **Whether Vercel logs
+request headers or bodies on any surface is unverified.** Checklist step 3
+records it when it runs. If headers are logged, record the retention and treat
+the cookie as this section treats the path today, as bounded by those two
+secrets.
+
+**Until ADR-0011 ships**, the decision below remains the position.
 
 ### Decision (proposed, pending `security` review): accept, bounded
 
@@ -204,6 +244,9 @@ the conditions are the decision:
   real link.** It is being routed separately; the "accept, bounded" decision
   above is provisional until it lands, and is moot for links issued under a
   fragment scheme if that is the outcome.
+
+  **Settled 2026-10-04 (#54, [ADR-0011](../adr/0011-portal-link-in-the-fragment.md)):
+  the fragment won**, with a top-level form POST and a `303 → /p`.
 * **Query string instead of path.** No better: hosts log query strings too.
 
 ### Revisit when
@@ -220,7 +263,9 @@ the conditions are the decision:
 
 Requires the Vercel project from [vercel.md](./vercel.md) (#28) to exist.
 
-1. **Rules.** Project, Firewall, Configure (Custom Rules), add:
+1. **Rules.** *(When ADR-0011 ships, the condition and rule set change — see
+   "When ADR-0011 ships" in §1. The steps below are for the current
+   `/p/<token>` shape.)* Project, Firewall, Configure (Custom Rules), add:
    * `portal-burst`: If *Request Path* *starts with* `/p/` → *Rate Limit*,
      fixed window **60 s**, **30** requests, keyed on **IP**, action
      **429 Too Many Requests**.
@@ -234,6 +279,10 @@ Requires the Vercel project from [vercel.md](./vercel.md) (#28) to exist.
    ```bash
    ./scripts/probe-portal-rate-limit.sh https://<production-domain>
    ```
+
+   *When ADR-0011 ships, the probe moves to `GET /p` and `POST /p/session`
+   with random bodies. A random path under `/p/` then tests the 404, not the
+   lookup. The script change is `infra`'s, with #54.*
 
    Paste the output on #40. If you probe a protected preview instead, and a
    bypass secret exists (see vercel.md), enter it without echoing it or
@@ -262,7 +311,9 @@ Requires the Vercel project from [vercel.md](./vercel.md) (#28) to exist.
    already tripped the limit once. For **each** of Logs (runtime), Firewall
    (traffic / logs, including the 429-refused requests) and Observability,
    record on #40 whether `/p/<token>` appears in full, and the retention the
-   view states for your plan. This replaces the "at the time of writing"
+   view states for your plan. Record also whether any surface shows request
+   **headers** or **bodies** — the residual question once ADR-0011 ships
+   (§2). This replaces the "at the time of writing"
    numbers above with observed ones.
 4. **Confirm the conditions hold**, recording each on #40:
    * Settings, Log Drains — none.

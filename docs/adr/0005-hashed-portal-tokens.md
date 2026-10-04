@@ -3,6 +3,8 @@
 **Status:** Accepted · July 2026
 **Relates to:** SDD §6.2, §12.4
 
+> **Amended by [ADR-0011](./0011-portal-link-in-the-fragment.md): the token travels in the URL fragment (`/p#<token>`), not the path, and is exchanged by form POST for a short MAC'd session cookie** — so it never reaches the host's logs. **Amended by [ADR-0010](./0010-portal-database-login.md), effective from migration 0008: `portal.ts` holds no service-role client;** it calls hash-keyed, self-logging definer functions as a dedicated `portal_reader` login, so the "explicit `bride_id` filter" below is replaced by a predicate the caller cannot write. Generation, hash-only storage, expiry, revocation and the rejection of JWTs stand. The text below is unchanged, as the record of what was decided.
+
 ## Context
 
 The bride is a end user, not a customer (PRD §3.3). She will enter 2–5 times in total, mostly to check when the next session is. She **will not create an account, will not remember a password, and will not install an app** — the PRD states this as fact, not preference.

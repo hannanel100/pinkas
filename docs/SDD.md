@@ -99,14 +99,14 @@ Rejected alternatives are recorded in [ADR-0001](./adr/0001-nextjs-supabase.md).
 flowchart TB
     subgraph clients["Clients"]
         IB["Instructor PWA<br/>Next.js App Router · RTL · offline outbox"]
-        BB["Bride browser<br/>/p/[token] — no account, no install"]
+        BB["Bride browser<br/>link /p#token — no account, no install"]
     end
 
     subgraph vercel["Vercel — Next.js server"]
         SA["Server Actions +<br/>Route Handlers"]
         DOM["lib/domain — PURE<br/>scheduling · risk · hebrew-calendar · templates"]
         DATA["lib/data — the chokepoint<br/>every instructor read/write, + access_log"]
-        POR["lib/data/portal.ts<br/>the only service-role module"]
+        POR["lib/data/portal.ts<br/>Postgres login portal_reader · PORTAL_DATABASE_URL"]
     end
 
     subgraph supa["Supabase"]
@@ -120,7 +120,7 @@ flowchart TB
 
     IB -->|"session cookie · httpOnly"| SA
     IB -->|"one tap, pre-composed"| WA
-    BB -.->|"opaque token, hashed on arrival"| POR
+    BB -.->|"token in fragment → form POST /p/session<br/>then a 30-min MAC-signed cookie"| POR
 
     SA --> DOM
     SA --> DATA
@@ -128,8 +128,8 @@ flowchart TB
 
     DATA -->|"client carrying the user's JWT<br/>RLS: tenant_id = auth.uid&#40;&#41;"| PG
     DATA -->|"signed URLs, per request"| ST
-    POR -.->|"service role + explicit bride_id filter<br/>portal_session_view only"| PG
-    POR -.-> ST
+    POR -.->|"EXECUTE on three portal_* definer functions only<br/>fixed hash predicate · each logs itself"| PG
+    POR -.->|"credential not yet designed — ADR-0010"| ST
     CRON --> PG
     AUTH -.->|"auth.users.id = instructor.id"| PG
 ```
@@ -138,7 +138,7 @@ Three things in that picture are load-bearing, and each is enforced somewhere ra
 
 * **`lib/data/` is the only door to the database** for instructor traffic (§13). Nothing in `clients` holds a Supabase client for bride data, which is what makes the access log complete. Nothing in `clients` holds a Supabase key at all: sign-in is a Server Action (§6.1), so the browser has no edge to Auth, and the session JWT travels in an `httpOnly` cookie that script in the page cannot read. The one place the log's completeness does not follow from this picture is a JWT used *outside* it — §13 and [ADR-0009](./adr/0009-session-record-column-revoke.md).
 * **`lib/domain/` has no edge to anything.** The two engines are pure functions called by the server layer; they never reach the database, which is what makes §17.2's fixture tests possible and is enforced as a lint error.
-* **The dashed edges are the untrusted path.** They originate at a browser with no account and terminate at exactly one view and one bucket prefix. The service-role key exists nowhere else.
+* **The dashed edges are the untrusted path.** They originate at a browser with no account. The token never crosses them in a URL: it lives in the link's fragment and reaches the server only in a POST body ([ADR-0011](./adr/0011-portal-link-in-the-fragment.md)). They terminate at three functions that look up by token hash and write their own `access_log` row, executed by a Postgres login that can do nothing else ([ADR-0010](./adr/0010-portal-database-login.md)). The service-role key is on no edge in this picture: it is in no deployed environment. *(Enforced in the database from migration 0008; the portal's Storage edge has no credential yet — ADR-0010, "Not settled".)*
 
 ### 2.3 The three access paths
 
@@ -154,10 +154,15 @@ The whole security design follows from there being exactly three ways data is re
 └────────────────────────────────────────────────────────────────────┘
 
 ┌── PATH 2 · BRIDE PORTAL (unauthenticated, low trust) ──────────────┐
-│  Browser ─→ /p/[token] Route Handler                               │
-│               └─ hash the token, look up the bride                 │
-│                    └─ service-role client, EXPLICIT bride_id filter │
-│                         └─ reads portal_session_view ONLY           │
+│  Link /p#<token> — the fragment never reaches the server           │
+│  Browser ─→ POST /p/session (token in form body)                   │
+│               └─ always 303 → /p; sets a MAC'd cookie on success   │
+│  Browser ─→ GET /p (cookie: token hash · expiry · MAC)             │
+│               └─ lib/data/portal.ts, Postgres login portal_reader  │
+│                    └─ EXECUTE only: portal_resolve_token(hash),    │
+│                       portal_sessions(hash), portal_rate_limit_hit │
+│                         └─ definer, fixed hash predicate, each     │
+│                            writes its own access_log row           │
 │  Reaches: date, time, place, shared materials. Nothing else.       │
 └────────────────────────────────────────────────────────────────────┘
 
@@ -170,7 +175,9 @@ The whole security design follows from there being exactly three ways data is re
 Two rules make this hold, and both are testable:
 
 1. **The browser never holds a Supabase client for bride data.** All reads go through `lib/data/` (§13). This is not a style preference — the access log in PRD §10.1 cannot otherwise be written correctly.
-2. **The service-role key is confined to Path 2 and Path 3.** It never appears in a code path that accepts arbitrary user input; the only untrusted input it ever sees is a portal token, which is hashed before use.
+2. **The service-role key is in no deployed environment** ([ADR-0010](./adr/0010-portal-database-login.md), enforced in the database from migration 0008). Path 2 holds `PORTAL_DATABASE_URL` instead: its role, `portal_reader`, has no table privileges and can execute three functions, two of which return nothing without a valid token hash. Path 3 runs in-database as `postgres` via `pg_cron`. The Route Handler variant of Path 3 would need a credential of its own; none is designed, and the service key is not the default answer. The production service key lives in the operator's keychain, for GoTrue admin work under §16.2's support procedure, and `SUPABASE_SERVICE_ROLE_KEY` anywhere under `app/`, `lib/` or `components/` is a lint error.
+
+> **Superseded by ADR-0010 (2026-10-04).** The rule read: *"The service-role key is confined to Path 2 and Path 3. It never appears in a code path that accepts arbitrary user input; the only untrusted input it ever sees is a portal token, which is hashed before use."* Three security reviews (#31/#34, #35, #37) found that this held in the codebase and nowhere else: on a live project the key reads every tenant's data and is also the GoTrue admin credential.
 
 ### 2.4 Module layout
 
@@ -181,7 +188,8 @@ app/
     brides/[id]/           plate 02
     courses/[id]/schedule/ plate 03
     curricula/ calendar/ finances/ settings/
-  p/[token]/               Path 2 — portal, plate 04. No shared layout with above.
+  p/                       Path 2 — portal shell, plate 04. No shared layout with above.
+    session/               the token exchange (Route Handler, ADR-0011)
 lib/
   domain/                  PURE. No I/O, no imports from lib/data or supabase.
     scheduling.ts          §7
@@ -189,7 +197,8 @@ lib/
     hebrew-calendar.ts     §9
     templates.ts           §14.2
   data/                    Server-only. The single chokepoint. §13
-  supabase/                client factories: user-jwt | service-role | job
+  supabase/                client factories: user-jwt | job. No service-role factory (ADR-0010);
+                           portal.ts holds its own Postgres connection
 components/
   ui/                      primitives bound to the token set (§10)
   risk/                    the only components allowed to emit colour
@@ -254,6 +263,8 @@ Two fields carry design weight:
 ### 3.7 `material`
 
 Files (Supabase Storage `storage_path`) or links (`url`), enforced mutually exclusive by a `CHECK`. `shared_with_bride` gates portal visibility (E3). Files are served to the portal as short-lived signed URLs generated per request — the storage path is never handed to the browser.
+
+**Open (ADR-0010):** with the service-role key in no deployed environment, nothing on the portal path can currently mint those signed URLs, because `portal_reader` is a Postgres login with no Storage access. This needs a design, from `backend` and `database` with a `security` review, before E3's portal half is built. Putting the service key back for Storage is not the default answer.
 
 ### 3.8 `payment`
 
@@ -371,21 +382,31 @@ On first sign-in, a transaction creates the `instructor` row (`id = auth.users.i
 
 ### 6.2 Bride portal
 
-The bride will not create an account, will not remember a password, and will not install anything (PRD §3.3). Access is a link. Design ([ADR-0005](./adr/0005-hashed-portal-tokens.md)):
+The bride will not create an account, will not remember a password, and will not install anything (PRD §3.3). Access is a link. Design ([ADR-0005](./adr/0005-hashed-portal-tokens.md), with the link format of [ADR-0011](./adr/0011-portal-link-in-the-fragment.md) and the database access of [ADR-0010](./adr/0010-portal-database-login.md)):
 
 | Property | Decision |
 |---|---|
+| Link | `https://<host>/p#<token>`. The token is in the **fragment**, which browsers never send, so it never appears in a request line or in any host log (ADR-0011). `/p/<anything>` is a 404 |
+| Exchange | An inline script in the `/p` shell reads the fragment, `replaceState`s the address to `/p`, and submits a hidden form to `POST /p/session`. The handler always answers `303 → /p`, for success and every failure alike; only `Set-Cookie` differs. CSRF gate: `Sec-Fetch-Site: same-origin`, or the header absent |
+| Session | Cookie `__Secure-p`, `HttpOnly; Secure; SameSite=Strict; Path=/p`, `Max-Age = min(30 min, time to expiry)`, not sliding. Value: token hash, expiry, HMAC under `PORTAL_SESSION_KEY` — never the token. No server-side session table |
+| Database access | `lib/data/portal.ts` connects as the Postgres login `portal_reader`, which can only execute `portal_resolve_token(hash)`, `portal_sessions(hash)` and `portal_rate_limit_hit`. Each lookup function has a fixed hash predicate and writes its own `('bride_portal', bride_id)` `access_log` row (ADR-0010; from migration 0008) |
 | Token | 32 random bytes, base64url, generated with a CSPRNG |
 | Storage | **SHA-256 hash only**, in `bride.portal_token_hash`. The plaintext token exists once, in the response that creates it |
-| Lookup | Hash the incoming token, look up by hash — an indexed equality match, so no timing signal from the query |
+| Lookup | Hash the incoming token, look up by hash — an indexed equality match, so no timing signal from the query. The exchange always hashes, always calls the counter and always runs the lookup. Every render re-checks the hash, so revocation, expiry and regeneration apply on the next render whatever the cookie says |
 | Expiry | `portal_expires_at`, default `wedding_date + 14 days` (E4) |
 | Revocation | Null the hash; regeneration issues a new token and invalidates the old |
-| Rate limit | Per-IP and per prefix of the token's **hash** — never of the token, since a prefix of a credential is a partial credential and would sit in the counter in plaintext. Primary control at the edge; a Postgres fixed-window counter behind it, because in-memory counters mean nothing on serverless |
+| Rate limit | Per-IP and per prefix of the token's **hash** — never of the token, since a prefix of a credential is a partial credential and would sit in the counter in plaintext. Primary control at the edge (rules match `/p` and `/p/*`, with a stricter rule on `POST /p/session` — `docs/runbooks/portal-edge.md`); a Postgres fixed-window counter behind it, called once per exchange, because in-memory counters mean nothing on serverless |
 | Indexing | `noindex, nofollow`, and `Referrer-Policy: no-referrer` so the token never leaks through an outbound link |
 
 Storing the hash rather than the token means a database disclosure does not hand the attacker working portal links. This costs nothing — the token is never displayed again after issuance, only re-sent by regenerating.
 
 **The expiry date is shown to the bride** ("הקישור פעיל עד 10.09", plate 04 note 4). That makes it a promise rather than a hidden policy, which is why it is a column with a value and not a constant in code.
+
+**"קישור חד-פעמי" (PRD D3) means one link, not one use.** She is sent one link, with no password, and it works until `portal_expires_at`. A single-use link would break her second visit, and a preview fetcher or link scanner could consume it before she taps it. ADR-0011 records the reading; PRD D3 carries the gloss.
+
+**What the bride's device needs.** Client JavaScript: one inline script, the only way to read a fragment. With it disabled she sees a neutral `<noscript>` line and no portal. History ends at `/p` with no hash. Reload works while the cookie lives, and re-opening the WhatsApp link re-exchanges. WhatsApp's preview, fetched on the sender's phone, can reach only the token-free shell. **Owed before #7 issues a real link:** device checks on Android and iOS that WhatsApp keeps the `#` fragment, that the cookie from the 303 survives the in-app browser, and that Chrome's global history records `/p`, not `/p#<token>` (ADR-0011).
+
+**Until ADR-0011 ships**, the deployed link shape is ADR-0005's `/p/<token>`, and the token-in-logs exposure is handled by `portal-edge.md` §2's "accept, bounded". No real link may be issued under that shape (#54 blocks #7).
 
 ### 6.3 Discretion requirements
 
@@ -674,7 +695,7 @@ PRD §8 marks this the central screen; the wireframe says 80% of usage and *"ope
 
 The §7 engine's UI. Inputs (curriculum, wedding date, cadence, **visible editable buffer**), the feasibility warning **with its remedy** (§7.4), the proposed slots with **visible skips** (§7.6), and two equally-weighted actions — "Confirm" and "Edit manually" (note c4).
 
-### 12.4 Plate 04 — Bride portal (`/p/[token]`)
+### 12.4 Plate 04 — Bride portal (`/p`)
 
 Phase 2, but designed now because its constraints reach back into Phase 1 (§5, §6.2).
 
@@ -685,6 +706,7 @@ Phase 2, but designed now because its constraints reach back into Phase 1 (§5, 
 * Shared materials, a message action, add-to-calendar.
 * Visible expiry date (§6.2).
 * Separate route group with **no shared layout** with the instructor app — no shared nav, no shared providers, nothing that could import an instructor-side query.
+* Two routes, both in that group: the `/p` shell, which renders the portal when the session cookie is valid and a neutral "open the link you received" line when not; and the `POST /p/session` exchange. The token arrives in the fragment, never in the path (§6.2, [ADR-0011](./adr/0011-portal-link-in-the-fragment.md)). Both send `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex, nofollow` and `Cache-Control: no-store, private`.
 
 ---
 
@@ -711,13 +733,15 @@ lib/data/
   sessions.ts    markDone, cancel, reschedule
   records.ts     upsertSessionRecord     ← private data; §5. Reads via the audited reader, ADR-0009
   today.ts       getTodayScreen          ← the single aggregated query; §18. Risk via risk.ts, §8.1
-  portal.ts      resolvePortalToken, getPortalView   ← Path 2 ONLY; service role
-  audit.ts       logAccess               ← called by every function above
+  portal.ts      resolvePortalToken, getPortalView   ← Path 2 ONLY; portal_reader login, ADR-0010
+  audit.ts       logAccess               ← called by every instructor-path function above
 ```
 
-`portal.ts` is the only module allowed to construct a service-role client, and the only one importable from `app/p/`. A lint boundary enforces both directions: `app/p/` cannot import instructor data modules, and instructor modules cannot import `portal.ts`.
+**The portal door (ADR-0010, from migration 0008).** `portal.ts` is the only module that reads `PORTAL_DATABASE_URL`, and the only one importable from `app/p/`. It opens a Postgres connection as `portal_reader` through Supavisor and calls the `portal_*` functions — nothing else, because the role can execute nothing else. It holds no Supabase client of any kind. Its lookups take the token **hash** (from the exchange, or from the verified session cookie of [ADR-0011](./adr/0011-portal-link-in-the-fragment.md)), never a `bride_id`, so there is no filter to forget: the predicate is written once, inside each function. **It does not call `logAccess`.** Each lookup function writes its own `('bride_portal', bride_id)` row in the same statement as the read, and only when a row resolved. The portal half of the log is therefore complete against any caller holding the credential, not only against this module. A lint boundary enforces both directions: `app/p/` cannot import instructor data modules, and instructor modules cannot import `portal.ts`. `SUPABASE_SERVICE_ROLE_KEY` anywhere under `app/`, `lib/` or `components/` is a lint error.
 
-**Where the door stops.** Everything above makes the log complete for traffic that uses this codebase. It does not make it complete for the deployment: Supabase exposes `public` through PostgREST, so a valid instructor JWT used directly — a stolen session, a support engineer's impersonated one — reads whatever `authenticated` is granted, with no `lib/data/` call and no log row. RLS still holds it to one tenant. Two answers, both in [ADR-0009](./adr/0009-session-record-column-revoke.md): the session cookie is `httpOnly` so page script cannot obtain the JWT (§6.1), and `authenticated` holds no `SELECT` on `session_record`'s three private columns, which are readable only through a `security definer` reader that writes its own `access_log` row in the same statement. The second stops at `session_record` by decision: `bride` and `session` stay directly readable by a JWT used outside the codebase, and that gap is accepted rather than closed with more definer readers.
+**How the instructor path writes the log (from migration 0009).** `audit.logAccess` calls the `log_access(bride_ids, action, resource, request_id)` definer function, which takes the actor from the JWT claims. `authenticated` has no `INSERT` on `access_log`, so a session cannot write a row attributed to anyone else, including a forged `'support'` row. Until 0009 lands, `logAccess` inserts directly and that forgery is possible.
+
+**Where the door stops.** Everything above makes the log complete for traffic that uses this codebase. It does not make it complete for the deployment: Supabase exposes `public` through PostgREST, so a valid instructor JWT used directly — a stolen session, a support session (§16.2) — reads whatever `authenticated` is granted, with no `lib/data/` call and no log row. RLS still holds it to one tenant. Two answers, both in [ADR-0009](./adr/0009-session-record-column-revoke.md): the session cookie is `httpOnly` so page script cannot obtain the JWT (§6.1), and `authenticated` holds no `SELECT` on `session_record`'s three private columns, which are readable only through a `security definer` reader that writes its own `access_log` row in the same statement. The second stops at `session_record` by decision: `bride` and `session` stay directly readable by a JWT used outside the codebase, and that gap is accepted rather than closed with more definer readers.
 
 ---
 
@@ -778,9 +802,10 @@ PRD §10.1 is unambiguous: *the database holds names, phone numbers, wedding dat
 | Private/public boundary | Physical table separation, §5, tested |
 | In transit | TLS, HSTS |
 | At rest | Provider-managed encryption + full-disk |
-| Access log | `access_log`, written by `lib/data/audit.ts`, §13; private-note reads logged in-database by the audited reader, ADR-0009 |
+| Access log | `access_log`, written by `lib/data/audit.ts`, §13; private-note reads logged in-database by the audited reader, ADR-0009; portal reads logged in-database by the portal functions, ADR-0010 (from 0008); from 0009 written only by functions, never by a direct insert |
 | App lock | WebAuthn, §6.1 |
-| Portal | Hashed tokens, expiry, rate limit, no indexing, §6.2 |
+| Portal | Tokens carried in the URL fragment and stored only as hashes, a 30-minute MAC'd session cookie, expiry, rate limit, no indexing, §6.2, ADR-0011; a dedicated database login with `EXECUTE` on three functions only, ADR-0010 |
+| Service-role key | In no deployed environment; operator keychain only, ADR-0010 (from 0008) |
 | Backups | Provider PITR **plus a restore drill that is actually performed** — an untested backup is not a backup |
 | Dependencies | Lockfile, automated advisories, minimal third-party JS; **zero third-party scripts on portal routes** |
 | Data residency | Frankfurt (`eu-central-1`) — §16.6 |
@@ -804,6 +829,36 @@ This needs a decision from the product owner, not from this document. It is reco
 Impersonation introduces the defect this section forbids if left alone: an impersonated session is indistinguishable from the instructor's own, so the instructor resolver would record a support read as hers. The minted JWT therefore carries an `impersonated_by` claim; the instructor resolver **refuses** any session carrying it, with no fallback, and the support resolver requires it together with a grant id.
 
 Stated plainly, because the order of weight matters: **that refusal is an application-level control, and it binds only tooling we build.** Whoever holds the service key controls the minting and can omit the claim, at which point the session is logged as the instructor's. Against the insider this section is actually about, what holds is the column revoke of [ADR-0009](./adr/0009-session-record-column-revoke.md) — with it, no session reaches a note body except through the logging reader, whatever its claims say. **Until that revoke lands (#34), support-read attribution rests on the application-level refusal alone,** and the published policy should not describe it as stronger than that.
+
+> **Superseded in part by [ADR-0010](./adr/0010-portal-database-login.md) (2026-10-04, #53 design challenge).** The three paragraphs above are kept as the record of the August position. What changed: the `impersonated_by` claim was never minted by anything, and its name and location were pinned nowhere. A session minted with the service key was logged as the instructor's own read. `today_screen` refused the claim while `read_session_records` logged it, so the two functions disagreed. And `authenticated` could insert an `access_log` row with any `actor_kind`, including a forged `'support'` row. "Without a new `access_log` insert policy" no longer holds either: from 0009 the log is written only by functions. The mechanism below replaces the August one.
+
+**Support attribution, settled (2026-10-04, [ADR-0010](./adr/0010-portal-database-login.md)).** Lands with migration 0009, behind a staging spike of the hook. Until then, the August position above is what is deployed.
+
+* **The claim.** Top-level `impersonated_by` (the engineer's uuid) and `support_grant_id`, both in the access token.
+* **Who mints it, and how.** A Supabase Custom Access Token Hook, `public.custom_access_token_hook`, executable only by `supabase_auth_admin`. It reads `support_grant` (engineer, tenant, reason, expiry, bound session id), a table only `postgres` can insert into. The hook binds a grant to the session it is issued for and stamps both claims on that session's token and on every refresh. **It refuses `magiclink` and `password` issuance that has no grant.** Instructors sign in by phone OTP (§6.1), so those methods are support-only, and the service key's `generateLink` produces nothing usable without a grant.
+* **What the functions do with it.** `today_screen` and `read_session_records` both log `('support', engineer)`. The instructor path's `log_access` takes the actor from the same claims. All three behave the same way, and the tests cover both functions.
+* **The procedure.** For each support read of a tenant's data, the operator:
+  1. inserts a `support_grant` row: engineer, tenant, reason, expiry;
+  2. runs `generateLink` for that tenant from a machine holding the production service key (the operator's keychain; the key is in no deployed environment);
+  3. signs in with that link and reads through the product.
+
+  Every read goes through `lib/data/` and lands in `access_log` as `('support', engineer)`. The grant's expiry bounds the session.
+* **Reads outside the product.** A dashboard SQL editor or `postgres` read of tenant data is preceded by the `postgres`-only `support_log_access(engineer, tenant, bride_ids, reason)`, which writes the `'support'` rows. pgaudit `read` on role `postgres` is what shows a read where that call was skipped.
+
+**The fallback, named in advance.** The hook is unverified: its `authentication_method` values, whether `session_id` survives refresh, and whether email-OTP fallback shares a method value with the flows it refuses. If the staging spike after 0008 shows the hook cannot do this, then:
+
+* `impersonated_by` becomes a reserved claim, and **both** functions refuse it with `42501`;
+* support reads go only through the editor, after `support_log_access(...)`, with pgaudit `read` on `postgres`.
+
+0009's instructor-path half (`log_access`, the `INSERT` revoke) lands either way.
+
+**Residual risk, stated plainly — and to be stated in the published policy no more strongly than this:**
+
+* A read through the SQL editor, or any `postgres` connection, is logged only if the operator calls `support_log_access` first. That call is a procedure, not a control. pgaudit makes skipping it detectable after the fact; it does not prevent it.
+* A holder of the production service key can impersonate an instructor and be logged as her. On the hook path, they would have to change her phone with `updateUserById` and sign in by OTP, the one method the hook must allow. On the fallback path, `generateLink` is not blocked at all.
+* The hook is switched on and off in the dashboard, by the same people who can open the SQL editor.
+
+What ADR-0010 changes is who holds the key: the operator's keychain only, instead of every deployed environment that ran the portal. Against a leak of anything deployed, attribution is now honest. Against the operator, it is a procedure backed by an audit trail, and must be described as one. The column revoke of ADR-0009 still holds whatever the claims say: no session reaches a note body except through the logging reader.
 
 ### 16.3 Client-side note encryption — considered, deferred
 
@@ -973,7 +1028,9 @@ PRD §10.1 lists it among encryption and RLS. It is not that class of control: i
 | [`schema.sql`](./schema.sql) | Authoritative schema; becomes migration `0001_init.sql` |
 | [`schema.test.sql`](./schema.test.sql) | Isolation and risk-tier verification |
 | [`schema.bootstrap.sql`](./schema.bootstrap.sql) | Supabase emulation for local testing |
-| [`adr/`](./adr/) | Nine decision records |
+| [`schema.bootstrap.migrator.sql`](./schema.bootstrap.migrator.sql) | Opt-in second bootstrap stage: applies the migrations as a non-superuser role shaped like Supabase's (`SCHEMA_TEST_AS_MIGRATOR=1`, §17.1) |
+| [`adr/`](./adr/) | Eleven decision records |
+| [`runbooks/`](./runbooks/) | Operator procedures: provisioning, Vercel and the environment matrix, migration delivery, portal edge controls |
 
 ## Appendix B — Decision records
 
@@ -988,3 +1045,5 @@ PRD §10.1 lists it among encryption and RLS. It is not that class of control: i
 | [0007](./adr/0007-wa-me-deep-links.md) | `wa.me` deep links over the Business API |
 | [0008](./adr/0008-today-risk-from-the-aggregate.md) | Today ranks risk in `risk.ts` from the view's aggregate, not the view's verdict |
 | [0009](./adr/0009-session-record-column-revoke.md) | Private note columns readable only through an audited reader |
+| [0010](./adr/0010-portal-database-login.md) | The portal gets its own Postgres login with `EXECUTE` on hash-keyed, self-logging functions only; the service-role key leaves every deployed environment; support attribution via an access-token hook |
+| [0011](./adr/0011-portal-link-in-the-fragment.md) | The portal token travels in the URL fragment, exchanged by form POST for a short MAC'd session cookie (supersedes ADR-0005's URL path) |

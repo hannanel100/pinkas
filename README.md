@@ -31,7 +31,7 @@ CLAUDE.md's invariants are enforced in `eslint.config.mjs`, so breaking one is a
 |---|---|
 | 3 — `lib/data/` is the only door to the database | `@supabase/*` importable only inside `lib/supabase/` |
 | 4 — `lib/domain/` is pure | no I/O or framework imports; `new Date()` and `Date.now()` banned |
-| 5 — service-role key is confined | importable only from `lib/data/portal.ts`; portal and instructor code cannot reach each other |
+| 5 — service-role key is confined | importable only from `lib/data/portal.ts`; portal and instructor code cannot reach each other. **Changes with migration 0008 ([ADR-0010](docs/adr/0010-portal-database-login.md)):** `PORTAL_DATABASE_URL` read only in `lib/data/portal.ts`, and `SUPABASE_SERVICE_ROLE_KEY` banned anywhere under `app/`, `lib/` and `components/` |
 | 7 — colour means risk, and nothing else | raw hex banned under `app/`+`components/`; `risk-*` tokens only in `components/risk/` |
 | 8 — RTL is the only direction | physical utilities (`ml-*`, `pl-*`, `left-*`) and physical CSS properties banned |
 
@@ -62,7 +62,7 @@ Revisit this whole arrangement when **TypeScript 7.1** ships the stable programm
 | **[docs/PRD.md](docs/PRD.md)** | Product requirements (Hebrew) — the problem, personas, user stories, business model |
 | **[docs/wireframes.html](docs/wireframes.html)** | Four annotated mobile screens. Open in a browser |
 | **[docs/SDD.md](docs/SDD.md)** | Software design — architecture, data model, isolation, scheduling engine, security |
-| **[docs/adr/](docs/adr/)** | Nine decision records covering the contested choices |
+| **[docs/adr/](docs/adr/)** | Eleven decision records covering the contested choices |
 
 ## Schema
 

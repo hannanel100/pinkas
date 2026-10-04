@@ -20,7 +20,7 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [`docs/schema.sql`](docs/schema.sql) | Authoritative schema. Becomes `supabase/migrations/0001_init.sql` unchanged. |
 | [`docs/schema.test.sql`](docs/schema.test.sql) | Isolation + risk-tier verification suite. Belongs in CI from the first commit. |
 | [`docs/schema.bootstrap.sql`](docs/schema.bootstrap.sql) | Emulates Supabase's `auth.uid()` and roles so the suite runs on plain Postgres. |
-| [`docs/adr/`](docs/adr/) | Nine decision records covering the contested choices. |
+| [`docs/adr/`](docs/adr/) | Eleven decision records covering the contested choices. |
 
 ### The ADRs
 
@@ -35,6 +35,8 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [0007](docs/adr/0007-wa-me-deep-links.md) | `wa.me` deep links, not the WhatsApp Business API (Phase 1) |
 | [0008](docs/adr/0008-today-risk-from-the-aggregate.md) | Today ranks risk in `risk.ts` from `v_course_risk`'s aggregate, not its verdict |
 | [0009](docs/adr/0009-session-record-column-revoke.md) | `session_record`'s private columns are readable only through an audited reader |
+| [0010](docs/adr/0010-portal-database-login.md) | The portal gets its own Postgres login (EXECUTE on hash-keyed, self-logging functions only); the service-role key leaves every deployed environment |
+| [0011](docs/adr/0011-portal-link-in-the-fragment.md) | The portal token travels in the URL fragment, exchanged by form POST for a short MAC'd session cookie |
 
 ## Invariants
 
@@ -44,7 +46,7 @@ These are load-bearing. Each one is enforced by a test or a lint rule, not by re
 2. **Private notes are physically separated, not hidden.** `session_record` (covered topics, `private_note`, `needs_review_note`) is unreachable from the bride portal by table structure. Hiding a field in the UI is a future bug. ADR-0003, SDD §5.
 3. **`lib/data/` is the only door to the database** for instructor traffic. The browser never holds a Supabase client for bride data — Postgres has no `AFTER SELECT`, so the access log required by PRD §10.1 is only complete if reads happen in one place. ADR-0006, SDD §13.
 4. **`lib/domain/` is pure.** `scheduling.ts`, `risk.ts`, `hebrew-calendar.ts`, `templates.ts` do no I/O and import nothing from `lib/data/` or `lib/supabase/` — a lint error. `today` is injected, never read from the clock. This is what makes the fixture tests possible. SDD §2.4, §17.2.
-5. **The service-role key exists in `lib/data/portal.ts` only**, reading `portal_session_view` with an explicit `bride_id` filter. `app/p/` cannot import instructor data modules and instructor modules cannot import `portal.ts`. SDD §2.3.
+5. **The portal has its own database credential, and the service-role key is in no deployed environment** *(enforced from migration 0008)*. `PORTAL_DATABASE_URL` is read in `lib/data/portal.ts` only, which calls only the `portal_*` functions — and the database enforces the same: `portal_reader` holds nothing but EXECUTE on those functions, each of which looks up by token hash and writes its own access-log row. `SUPABASE_SERVICE_ROLE_KEY` anywhere under `app/`, `lib/` or `components/` is a lint error. `app/p/` cannot import instructor data modules and instructor modules cannot import `portal.ts`. ADR-0010, SDD §2.3.
 6. **Courses hold a curriculum snapshot.** Editing a template must never rewrite the history of courses already taught from it. `curriculum_id` is provenance only. ADR-0004, SDD §3.5.
 7. **Colour carries exactly one meaning: risk.** The theme exposes no chromatic token except `risk.1/2/3`, only `components/risk/` may reference them, and raw hex is banned in `app/` and `components/`. Risk is never encoded by colour alone — always paired with a reason sentence and a day count. SDD §10.2, §18.2.
 8. **RTL is the only direction.** `<html lang="he" dir="rtl">`, logical CSS properties only (`inset-inline-start`, `padding-inline`); `left`/`right`/`ml-*`/`pl-*` are lint errors. Machine-readable quantities (times, dates, day counts, currency) render through the `<Metric>` primitive in IBM Plex Mono with `dir="ltr"`. Strings live in a translation layer, so risk sentences can be composed from reason codes. SDD §10.3, §11.
