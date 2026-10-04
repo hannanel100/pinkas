@@ -2224,6 +2224,9 @@ insert into session (id, tenant_id, course_id, order_index, scheduled_at, status
    'a2000000-0000-4000-8000-000000000551', 1, now() + interval '5 days', 'planned'),
   ('b3000000-0000-4000-8000-000000000551', 'b0000000-0000-4000-8000-000000000002',
    'b2000000-0000-4000-8000-000000000551', 1, now() + interval '5 days', 'planned');
+insert into payment (id, tenant_id, course_id, amount, method, paid_at) values
+  ('a5000000-0000-4000-8000-000000000550', 'a0000000-0000-4000-8000-000000000001',
+   'a2000000-0000-4000-8000-000000000551', 100, 'cash', current_date);
 
 -- ---------- catalog: four composite FKs, validated, actions preserved, no leftovers ----------
 do $$
@@ -2334,9 +2337,23 @@ begin
     raise exception 'FAIL: tenant A re-pointed her session at tenant B''s session';
   exception when foreign_key_violation then null;
   end;
+  begin
+    update session set course_id = 'b2000000-0000-4000-8000-000000000551'
+     where id = 'a3000000-0000-4000-8000-000000000551';
+    raise exception 'FAIL: tenant A moved her session onto tenant B''s course';
+  exception when foreign_key_violation then null;
+  end;
+  begin
+    update payment set course_id = 'b2000000-0000-4000-8000-000000000551'
+     where id = 'a5000000-0000-4000-8000-000000000550';
+    raise exception 'FAIL: tenant A moved her payment onto tenant B''s course';
+  exception when foreign_key_violation then null;
+  end;
 
-  -- the existence oracle is closed: B's real id and an id that exists
-  -- nowhere fail identically
+  -- the existence oracle is closed FOR THE FK PATH: B's real id and an id
+  -- that exists nowhere fail identically. A primary-key collision (23505 on
+  -- an insert that reuses a known id) still confirms the id exists; that is
+  -- a rule for lib/data/, not for this constraint.
   begin
     insert into payment (tenant_id, course_id, amount, method, paid_at)
       values (auth.uid(), 'b2000000-0000-4000-8000-000000000551', 1, 'cash', current_date);
@@ -2351,7 +2368,7 @@ begin
     raise exception 'FAIL: B''s course id (%) and a nonexistent id (%) are distinguishable', st_real, st_fake;
   end if;
 
-  raise notice 'PASS: #55 cross-tenant attach rejected on all four FKs (insert and update), no existence oracle';
+  raise notice 'PASS: #55 cross-tenant attach rejected on all four FKs (insert and update), no FK-path existence oracle';
 end $$;
 
 -- ---------- same-tenant behaviour unchanged ----------
@@ -2367,6 +2384,9 @@ begin
   insert into session (id, tenant_id, course_id, order_index, rescheduled_from_session_id)
     values ('a3000000-0000-4000-8000-000000000553', auth.uid(),
             'a2000000-0000-4000-8000-000000000551', 3, 'a3000000-0000-4000-8000-000000000552');
+  insert into session (id, tenant_id, course_id, order_index)
+    values ('a3000000-0000-4000-8000-000000000554', auth.uid(),
+            'a2000000-0000-4000-8000-000000000552', 1);
   insert into payment (id, tenant_id, course_id, amount, method, paid_at)
     values ('a5000000-0000-4000-8000-000000000551', auth.uid(),
             'a2000000-0000-4000-8000-000000000551', 250, 'bit', current_date);
@@ -2377,8 +2397,45 @@ begin
   raise notice 'PASS: #55 same-tenant inserts and updates on all four FKs succeed';
 end $$;
 
--- ---------- referential actions, exercised (hard deletes, as superuser) ----------
+-- ---------- a parent cannot change tenant under its children (as superuser) ----------
+-- No policy lets an instructor rewrite tenant_id, but a superuser / service
+-- role can; the composite keys (ON UPDATE NO ACTION) must still refuse to
+-- move a parent into another tenant while children point at it.
 reset role;
+do $$
+declare con text;
+begin
+  -- bride with courses -> course_bride_tenant_fk
+  con := null;
+  begin
+    update bride set tenant_id = 'b0000000-0000-4000-8000-000000000002'
+     where id = 'a1000000-0000-4000-8000-000000000551';
+  exception when foreign_key_violation then
+    get stacked diagnostics con = constraint_name;
+  end;
+  if con is distinct from 'course_bride_tenant_fk' then
+    raise exception 'FAIL: moving a bride with courses to tenant B was not stopped by course_bride_tenant_fk (got %)', con;
+  end if;
+
+  -- course with sessions -> session_course_tenant_fk. bride_id moves with it
+  -- to B's bride, so the course's own key is satisfied and only the
+  -- children can object (course 552 has a session and no payment).
+  con := null;
+  begin
+    update course set tenant_id = 'b0000000-0000-4000-8000-000000000002',
+                      bride_id  = 'b1000000-0000-4000-8000-000000000551'
+     where id = 'a2000000-0000-4000-8000-000000000552';
+  exception when foreign_key_violation then
+    get stacked diagnostics con = constraint_name;
+  end;
+  if con is distinct from 'session_course_tenant_fk' then
+    raise exception 'FAIL: moving a course with sessions to tenant B was not stopped by session_course_tenant_fk (got %)', con;
+  end if;
+
+  raise notice 'PASS: #55 a bride or course cannot change tenant under its children';
+end $$;
+
+-- ---------- referential actions, exercised (hard deletes, as superuser) ----------
 do $$
 declare n int; t uuid; p uuid;
 begin

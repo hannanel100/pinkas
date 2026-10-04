@@ -25,8 +25,16 @@
 --   * learn whether a UUID exists in tenant B (FK error vs. success — an
 --     existence oracle across tenants), and
 --   * attach her own course/session/payment to B's bride/course/session —
---     invisible to B under RLS, but squatting on B's objects, and swept into
---     B's cascades (a hard delete of B's bride would delete A's course).
+--     invisible to instructor B under RLS, but squatting on B's objects, and
+--     swept into B's cascades (a hard delete of B's bride would delete A's
+--     course), and
+--   * DISCLOSE TO B'S BRIDE through the portal. portal_session_view joins
+--     session -> course and is filtered only on c.bride_id; the portal reads
+--     it with the service role, which bypasses RLS (lib/data/portal.ts,
+--     invariant 5). So A's session hung off B's course, or any session of
+--     A's course hung off B's bride, appeared on B's bride's portal with
+--     A's session times, durations, locations and statuses. Payment and
+--     reschedule-pointer squats are not portal-visible; the other two are.
 --
 -- THE SHAPE
 --
@@ -58,6 +66,14 @@
 -- potential privacy incident (PRD §10.1), and take it back to `database`
 -- and `security`. The migration itself repeats this check and aborts with
 -- the counts, atomically, if any row is found.
+--
+-- Scope a non-zero result as a possible PORTAL DISCLOSURE, not only as
+-- squatting: a `course.bride_id` or `session.course_id` row means the
+-- squatting tenant's sessions were readable on the other tenant's bride's
+-- portal (see THE GAP). For those rows, establish whether the affected
+-- bride's portal link was live while the row existed (bride.portal_token_*,
+-- portal_expires_at) and what the portal served — the sessions' scheduled_at
+-- and location may describe a third party: one of the squatter's own brides.
 --
 --   select 'course.bride_id' as fk, c.id as child_id, c.tenant_id, b.tenant_id as parent_tenant
 --     from public.course c join public.bride b on b.id = c.bride_id
