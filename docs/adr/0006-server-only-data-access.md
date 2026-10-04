@@ -3,6 +3,8 @@
 **Status:** Accepted · July 2026
 **Relates to:** SDD §2.3, §13
 
+> **Qualified by [ADR-0009](./0009-session-record-column-revoke.md).** "Complete by construction" holds for this codebase, not for the deployment: PostgREST, the dashboard SQL editor and the service-role key are other ways in. ADR-0009 records how the private columns are closed against them. The text below is unchanged, as the record of what was decided.
+
 ## Context
 
 Supabase's client library is designed to be called from the browser: ship the anon key, let RLS enforce isolation, query directly. It is the documented happy path and it removes a whole tier of code.

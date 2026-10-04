@@ -7,8 +7,12 @@
  * is right in the middle and wrong at the edge is the failure mode that matters
  * on the Today screen.
  *
- * `v_course_risk` (`supabase/migrations/`) remains the source of truth. The fixtures
- * mirror the view's own test data in `schema.test.sql` where they overlap.
+ * Since ADR-0008 these rows gate the Today screen itself: `assessRisk()` ranks
+ * it online and offline. `v_course_risk` (`supabase/migrations/`) is the source
+ * of truth for the nightly job only, and the two must agree tier for tier — the
+ * fixtures mirror the view's own test data in `schema.test.sql` where they
+ * overlap, and that pairing is the contract. (`high` is still counted in SQL
+ * online; `summariseCourse` counts it offline.)
  */
 
 import { describe, expect, it } from "vitest";
@@ -230,7 +234,7 @@ const rows: readonly Row[] = [
   },
 ];
 
-describe("assessRisk mirrors v_course_risk (§8.1)", () => {
+describe("assessRisk ranks the §8.1 tiers, in agreement with v_course_risk", () => {
   it.each(rows)("$name", (row) => {
     const assessment = assessRisk(row.input);
     expect(assessment.level).toBe(row.level);

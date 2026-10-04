@@ -20,7 +20,7 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [`docs/schema.sql`](docs/schema.sql) | Authoritative schema. Becomes `supabase/migrations/0001_init.sql` unchanged. |
 | [`docs/schema.test.sql`](docs/schema.test.sql) | Isolation + risk-tier verification suite. Belongs in CI from the first commit. |
 | [`docs/schema.bootstrap.sql`](docs/schema.bootstrap.sql) | Emulates Supabase's `auth.uid()` and roles so the suite runs on plain Postgres. |
-| [`docs/adr/`](docs/adr/) | Seven decision records covering the contested choices. |
+| [`docs/adr/`](docs/adr/) | Nine decision records covering the contested choices. |
 
 ### The ADRs
 
@@ -33,6 +33,8 @@ The product is organised around a **hard deadline** — the wedding date — not
 | [0005](docs/adr/0005-hashed-portal-tokens.md) | Hashed opaque portal tokens, not JWT magic links |
 | [0006](docs/adr/0006-server-only-data-access.md) | All bride-data access goes through the server |
 | [0007](docs/adr/0007-wa-me-deep-links.md) | `wa.me` deep links, not the WhatsApp Business API (Phase 1) |
+| [0008](docs/adr/0008-today-risk-from-the-aggregate.md) | Today ranks risk in `risk.ts` from `v_course_risk`'s aggregate, not its verdict |
+| [0009](docs/adr/0009-session-record-column-revoke.md) | `session_record`'s private columns are readable only through an audited reader |
 
 ## Invariants
 
@@ -52,12 +54,11 @@ These are load-bearing. Each one is enforced by a test or a lint rule, not by re
 ## Verifying the schema
 
 ```bash
-createdb pinkas_test
-psql -d pinkas_test -v ON_ERROR_STOP=1 \
-  -f docs/schema.bootstrap.sql \
-  -f docs/schema.sql \
-  -f docs/schema.test.sql
+./scripts/test-schema.sh                             # as superuser; the CI path
+SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh   # as a non-superuser role shaped like Supabase's; throwaway cluster only
 ```
+
+The script builds the database from `supabase/migrations/` in order — the schema that actually ships — and rejects a gap in the migration numbers. `docs/schema.sql` is frozen at `0001_init.sql` (see `docs/runbooks/migrations.md`); schema changes go into a new migration, never into `schema.sql`.
 
 A non-zero exit means the isolation design has regressed. Run this after any schema change.
 

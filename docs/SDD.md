@@ -118,13 +118,13 @@ flowchart TB
 
     WA["WhatsApp<br/>wa.me deep link"]
 
-    IB -->|"user JWT"| SA
-    IB -->|"OTP"| AUTH
+    IB -->|"session cookie · httpOnly"| SA
     IB -->|"one tap, pre-composed"| WA
     BB -.->|"opaque token, hashed on arrival"| POR
 
     SA --> DOM
     SA --> DATA
+    SA -->|"phone OTP, issued and verified server-side"| AUTH
 
     DATA -->|"client carrying the user's JWT<br/>RLS: tenant_id = auth.uid&#40;&#41;"| PG
     DATA -->|"signed URLs, per request"| ST
@@ -136,7 +136,7 @@ flowchart TB
 
 Three things in that picture are load-bearing, and each is enforced somewhere rather than merely intended:
 
-* **`lib/data/` is the only door to the database** for instructor traffic (§13). Nothing in `clients` holds a Supabase client for bride data, which is what makes the access log complete.
+* **`lib/data/` is the only door to the database** for instructor traffic (§13). Nothing in `clients` holds a Supabase client for bride data, which is what makes the access log complete. Nothing in `clients` holds a Supabase key at all: sign-in is a Server Action (§6.1), so the browser has no edge to Auth, and the session JWT travels in an `httpOnly` cookie that script in the page cannot read. The one place the log's completeness does not follow from this picture is a JWT used *outside* it — §13 and [ADR-0009](./adr/0009-session-record-column-revoke.md).
 * **`lib/domain/` has no edge to anything.** The two engines are pure functions called by the server layer; they never reach the database, which is what makes §17.2's fixture tests possible and is enforced as a lint error.
 * **The dashed edges are the untrusted path.** They originate at a browser with no account and terminate at exactly one view and one bucket prefix. The service-role key exists nowhere else.
 
@@ -149,7 +149,8 @@ The whole security design follows from there being exactly three ways data is re
 │  Browser ─→ Server Action / Route Handler                          │
 │               └─ Supabase client carrying THE USER'S JWT           │
 │                    └─ RLS active: tenant_id = auth.uid()           │
-│  Reaches: everything belonging to that tenant, incl. session_record│
+│  Reaches: everything belonging to that tenant. session_record's    │
+│  private columns only through the audited reader (ADR-0009)        │
 └────────────────────────────────────────────────────────────────────┘
 
 ┌── PATH 2 · BRIDE PORTAL (unauthenticated, low trust) ──────────────┐
@@ -362,6 +363,8 @@ PRD §14 asks whether the bride should see the *topic list* or only dates. This 
 
 Supabase Auth, **phone OTP primary**, email as fallback and recovery. The persona (PRD §3.1) already lives in WhatsApp and Bit; a phone code is the flow she has used a hundred times. Story A1 requires signup under 60 seconds with no credit card, which means no email verification round-trip on the critical path.
 
+**The OTP is requested and verified in a Server Action, not from the browser.** The browser holds no Supabase key — not even the anon key — so it has no edge to Auth (§2.2). The session lands in a cookie set `httpOnly`, `secure`, `sameSite=lax`, path `/`, explicitly: `@supabase/ssr` writes whatever options it is handed and Next's `cookies().set()` does not default to `httpOnly`, so the flags are asserted by a test that reads back the `Set-Cookie` header rather than the options object. This is the primary defence against the bypass [ADR-0009](./adr/0009-session-record-column-revoke.md) describes — a JWT that page script cannot read is a JWT that cannot be replayed against PostgREST from the page.
+
 On first sign-in, a transaction creates the `instructor` row (`id = auth.users.id`) and seeds the system message templates (§14.2), so D1 works before the instructor has ever visited settings.
 
 **App lock.** WebAuthn platform authenticator (Face/Touch/device biometric) gating an already-authenticated session, with cached data cleared from memory on lock. Motivated by PRD §3.1 and §10.1: *she hands the phone to her children.* Stated honestly — this is a shoulder-surfing and casual-access defence, not a cryptographic one; the session token still exists on the device. It is not a substitute for §16's controls.
@@ -377,7 +380,7 @@ The bride will not create an account, will not remember a password, and will not
 | Lookup | Hash the incoming token, look up by hash — an indexed equality match, so no timing signal from the query |
 | Expiry | `portal_expires_at`, default `wedding_date + 14 days` (E4) |
 | Revocation | Null the hash; regeneration issues a new token and invalidates the old |
-| Rate limit | Per-IP and per-token-prefix, on the route |
+| Rate limit | Per-IP and per prefix of the token's **hash** — never of the token, since a prefix of a credential is a partial credential and would sit in the counter in plaintext. Primary control at the edge; a Postgres fixed-window counter behind it, because in-memory counters mean nothing on serverless |
 | Indexing | `noindex, nofollow`, and `Referrer-Policy: no-referrer` so the token never leaks through an outbound link |
 
 Storing the hash rather than the token means a database disclosure does not hand the attacker working portal links. This costs nothing — the token is never displayed again after issuance, only re-sent by regenerating.
@@ -493,7 +496,14 @@ The Today screen's ranking (PRD §9, plate 01) — the product's core claim.
 
 ### 8.1 Tiers
 
-Implemented in `v_course_risk` (in `schema.sql`) and mirrored by a pure TS function in `lib/domain/risk.ts` for offline use. All five tiers are asserted by `schema.test.sql`.
+Implemented twice, deliberately, and each implementation is the source of truth for a different consumer ([ADR-0008](./adr/0008-today-risk-from-the-aggregate.md)):
+
+* **`assessRisk()` in `lib/domain/risk.ts` ranks the Today screen — online and offline alike.** Online, it is fed the aggregate columns `today_screen` returns; offline (§15), `summariseCourse()` builds the same input from cached rows. One function either way, so the screen cannot change its answer when she loses signal. Its fixture table (§17.2) is the contract.
+* **`v_course_risk` in `schema.sql` is the source of truth for the nightly job (§8.4)** — which runs in-database and cannot call TypeScript — and is the SQL half of the agreement `schema.test.sql` asserts tier by tier.
+
+The two must still agree tier for tier, because a disagreement now shows up as the nightly notification contradicting the screen. One place they knowingly do not, accepted in ADR-0008:
+
+* **`high` is still decided in SQL.** `stale_cancellations` is counted inside the view's aggregate with the 7-day threshold embedded, and arrives at `risk.ts` pre-counted. Online and offline can therefore still differ on this one tier. Removing that would mean shipping every session to the server.
 
 | Level | Condition | `risk_reason_code` |
 |---|---|---|
@@ -512,7 +522,7 @@ Two readings the table leaves implicit, both fixed in migration `0003` and asser
 
 ### 8.2 Computed on read, never stored
 
-`v_course_risk` is a view. The ranking is derived at query time from sessions and dates, so it cannot be stale — there is no job whose failure silently leaves the Today screen showing yesterday's truth. Given the data volume (PRD §3: 10–20 brides per instructor, 50+ for the professional persona), this is comfortably cheap; the supporting indexes are in `schema.sql`.
+Neither implementation stores anything. The aggregate is derived by a view at query time and the verdict by a pure function at render time, so the ranking cannot be stale — there is no job whose failure silently leaves the Today screen showing yesterday's truth. Given the data volume (PRD §3: 10–20 brides per instructor, 50+ for the professional persona), this is comfortably cheap; the supporting indexes are in `schema.sql`.
 
 ### 8.3 The reason code is the feature
 
@@ -522,7 +532,7 @@ The UI renders the code plus its operands into that sentence. The code is machin
 
 ### 8.4 The nightly job
 
-`pg_cron` evaluates the same view nightly **only to drive notifications** (Phase 2). It does not populate the screen. Two mechanisms, one source of truth: the view.
+`pg_cron` evaluates `v_course_risk` nightly **only to drive notifications** (Phase 2). It does not populate the screen. For this job the view *is* the source of truth — the screen's is `risk.ts` (§8.1) — which is why the two are held to agreement by tests rather than by one deriving from the other.
 
 ### 8.5 Empty state
 
@@ -641,7 +651,7 @@ Order on screen is the design argument, and must not be "improved" into a calend
 
 | Block | Source | Notes |
 |---|---|---|
-| At-risk brides | `v_course_risk`, ordered by level | The only colour on the screen (§10.2). Each row states its reason (§8.3) |
+| At-risk brides | `today_screen`'s risk aggregate → `assessRisk()` (§8.1), ordered by level | The only colour on the screen (§10.2). Each row states its reason (§8.3) |
 | Today's sessions | `session` where `scheduled_at::date = today` | One-tap reminder → §14 |
 | Open payments | `payment` vs `course.agreed_price` | One number, detail behind a tap |
 
@@ -690,7 +700,7 @@ Consequences, accepted deliberately ([ADR-0006](./adr/0006-server-only-data-acce
 
 * Realtime subscriptions are unavailable in Phase 1. Nothing in the PRD needs them.
 * Every screen is server-rendered or fetched through a Server Action — which is also what §18's latency budget wants.
-* The Supabase anon key is never shipped with permission to read bride tables.
+* No Supabase key is shipped to the browser at all — sign-in is a Server Action (§6.1).
 
 Shape:
 
@@ -699,13 +709,15 @@ lib/data/
   brides.ts      listBrides, getBrideCard, createBride
   courses.ts     createCourse (snapshot), recomputeSchedule, confirmSchedule
   sessions.ts    markDone, cancel, reschedule
-  records.ts     upsertSessionRecord     ← private data; §5
-  today.ts       getTodayScreen          ← the single aggregated query; §18
+  records.ts     upsertSessionRecord     ← private data; §5. Reads via the audited reader, ADR-0009
+  today.ts       getTodayScreen          ← the single aggregated query; §18. Risk via risk.ts, §8.1
   portal.ts      resolvePortalToken, getPortalView   ← Path 2 ONLY; service role
   audit.ts       logAccess               ← called by every function above
 ```
 
 `portal.ts` is the only module allowed to construct a service-role client, and the only one importable from `app/p/`. A lint boundary enforces both directions: `app/p/` cannot import instructor data modules, and instructor modules cannot import `portal.ts`.
+
+**Where the door stops.** Everything above makes the log complete for traffic that uses this codebase. It does not make it complete for the deployment: Supabase exposes `public` through PostgREST, so a valid instructor JWT used directly — a stolen session, a support engineer's impersonated one — reads whatever `authenticated` is granted, with no `lib/data/` call and no log row. RLS still holds it to one tenant. Two answers, both in [ADR-0009](./adr/0009-session-record-column-revoke.md): the session cookie is `httpOnly` so page script cannot obtain the JWT (§6.1), and `authenticated` holds no `SELECT` on `session_record`'s three private columns, which are readable only through a `security definer` reader that writes its own `access_log` row in the same statement. The second stops at `session_record` by decision: `bride` and `session` stay directly readable by a JWT used outside the codebase, and that gap is accepted rather than closed with more definer readers.
 
 ---
 
@@ -748,6 +760,8 @@ Scoped exactly to PRD §10.3's promise — *view the schedule and add a note* �
 
 **Conflict resolution: per-field last-write-wins on `updated_at`.** Chosen because the realistic conflict — one instructor, two devices, or one device replaying a stale queue — is rare and low-stakes. Notes are append-oriented and single-author; CRDTs would be unjustified complexity here. The one guard: an outbox entry older than 7 days is surfaced for confirmation rather than replayed silently, because a week-old queued edit may no longer be what she wants.
 
+Offline risk on the Today screen is computed by `assessRisk()` from cached rows — the same function that ranks it online (§8.1), so the screen's verdict does not switch on connectivity, except on the `high` tier as ADR-0008 records.
+
 Install prompt after the third session (PRD §10.3, PWA to home screen without an app store). App name and icon are neutral (§6.3).
 
 ---
@@ -764,7 +778,7 @@ PRD §10.1 is unambiguous: *the database holds names, phone numbers, wedding dat
 | Private/public boundary | Physical table separation, §5, tested |
 | In transit | TLS, HSTS |
 | At rest | Provider-managed encryption + full-disk |
-| Access log | `access_log`, written by `lib/data/audit.ts`, §13 |
+| Access log | `access_log`, written by `lib/data/audit.ts`, §13; private-note reads logged in-database by the audited reader, ADR-0009 |
 | App lock | WebAuthn, §6.1 |
 | Portal | Hashed tokens, expiry, rate limit, no indexing, §6.2 |
 | Backups | Provider PITR **plus a restore drill that is actually performed** — an untested backup is not a backup |
@@ -784,6 +798,12 @@ PRD §14 lists it first: *can the product team read the notes? An explicit decis
 This needs a decision from the product owner, not from this document. It is recorded here so it cannot be reached by default.
 
 **Decision (2026-07-27, product owner): yes — currently the product team may read notes.** This supersedes the recommendation above for now. Two consequences still bind: the in-product privacy policy must say so in plain Hebrew (§11.4 — an honest "yes" costs less trust than a discovered "no"), and every support read must land in `access_log` with `actor_kind = 'support'`, so the policy can later be tightened to break-glass without a schema change. The word *currently* is deliberate: this is to be revisited before public launch.
+
+**Fulfilling the attribution in Phase 1 (2026-08-05, #7 design challenge).** It is fulfillable without a `support` Postgres role and without a new `access_log` insert policy. Support reads go through the same door, by **impersonation**: the service key mints a session for the tenant, so `auth.uid()` is the tenant and the existing `with check (tenant_id = auth.uid())` passes unchanged, and the row is written with `actor_kind = 'support'` and `actor_id` = the engineer. A CHECK on `access_log` — `actor_kind <> 'instructor' or actor_id = tenant_id` — makes a support read forged as an instructor's attributable to nobody, which is loud rather than quiet. It needs a support console that goes through `lib/data/`; nothing else.
+
+Impersonation introduces the defect this section forbids if left alone: an impersonated session is indistinguishable from the instructor's own, so the instructor resolver would record a support read as hers. The minted JWT therefore carries an `impersonated_by` claim; the instructor resolver **refuses** any session carrying it, with no fallback, and the support resolver requires it together with a grant id.
+
+Stated plainly, because the order of weight matters: **that refusal is an application-level control, and it binds only tooling we build.** Whoever holds the service key controls the minting and can omit the claim, at which point the session is logged as the instructor's. Against the insider this section is actually about, what holds is the column revoke of [ADR-0009](./adr/0009-session-record-column-revoke.md) — with it, no session reaches a note body except through the logging reader, whatever its claims say. **Until that revoke lands (#34), support-read attribution rests on the application-level refusal alone,** and the published policy should not describe it as stronger than that.
 
 ### 16.3 Client-side note encryption — considered, deferred
 
@@ -831,15 +851,16 @@ Consequences accepted: moving regions later is a database migration with downtim
 8. The three private field names appear in exactly one relation in the schema.
 9. All five risk tiers rank as §8.1 specifies.
 
+Each later migration appends its own section to the suite, headed with its issue numbers — the atomic signup seed (#36), the Israeli-clock risk view (#38, #42), `today_screen` (#35), the platform-grant revokes and the audited `session_record` reader (#31, #34), the portal objects (#37) — so the list above is the floor, not the whole.
+
 To run, with any Postgres 15+:
 
 ```bash
-createdb pinkas_test
-psql -d pinkas_test -v ON_ERROR_STOP=1 \
-  -f docs/schema.bootstrap.sql \   # emulates Supabase's auth.uid() and roles
-  -f docs/schema.sql \
-  -f docs/schema.test.sql
+./scripts/test-schema.sh                             # as superuser; the CI path
+SCHEMA_TEST_AS_MIGRATOR=1 ./scripts/test-schema.sh   # as a non-superuser role shaped like Supabase's
 ```
+
+The script applies `schema.bootstrap.sql` (which emulates Supabase's `auth.uid()`, roles and default privileges), then every file in `supabase/migrations/` in order, then `schema.test.sql`. It does not read `schema.sql`, which is frozen at `0001_init.sql`: the schema under test is the one that ships.
 
 Non-zero exit means the isolation design regressed. This belongs in CI from the first commit.
 
@@ -867,7 +888,7 @@ Both engines are pure, so these are fast and deterministic — no database, no c
 
 PRD §10.3: the home screen loads in **under 2 seconds on a cellular connection**. It is the screen she opens every morning; if it is slow she stops opening it, and per PRD §8 that is product failure.
 
-* Today is server-rendered from **one aggregated query** (`lib/data/today.ts`) — risk, sessions and payment totals together. Not three round trips.
+* Today is server-rendered from **one aggregated query** (`lib/data/today.ts`) — risk, sessions and payment totals together. Not three round trips. Risk arrives as the view's aggregate and is ranked by `risk.ts` on the server (§8.1); that changes the select list, not the round-trip count.
 * Budget: ≤150 KB JS gzipped on the Today route. The screen is mostly text and borders; the wireframe implies almost no client-side interactivity.
 * Self-hosted fonts, subset, preloaded (§10.4).
 * Portal routes: no analytics, no third-party JS at all (§6.3).
@@ -952,7 +973,7 @@ PRD §10.1 lists it among encryption and RLS. It is not that class of control: i
 | [`schema.sql`](./schema.sql) | Authoritative schema; becomes migration `0001_init.sql` |
 | [`schema.test.sql`](./schema.test.sql) | Isolation and risk-tier verification |
 | [`schema.bootstrap.sql`](./schema.bootstrap.sql) | Supabase emulation for local testing |
-| [`adr/`](./adr/) | Seven decision records |
+| [`adr/`](./adr/) | Nine decision records |
 
 ## Appendix B — Decision records
 
@@ -965,3 +986,5 @@ PRD §10.1 lists it among encryption and RLS. It is not that class of control: i
 | [0005](./adr/0005-hashed-portal-tokens.md) | Hashed opaque portal tokens |
 | [0006](./adr/0006-server-only-data-access.md) | Server-only data access |
 | [0007](./adr/0007-wa-me-deep-links.md) | `wa.me` deep links over the Business API |
+| [0008](./adr/0008-today-risk-from-the-aggregate.md) | Today ranks risk in `risk.ts` from the view's aggregate, not the view's verdict |
+| [0009](./adr/0009-session-record-column-revoke.md) | Private note columns readable only through an audited reader |

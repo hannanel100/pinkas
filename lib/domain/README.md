@@ -5,7 +5,7 @@
 | Module | Design |
 |---|---|
 | `scheduling.ts` | §7 — backward placement from `weddingDate − bufferDays` |
-| `risk.ts` | §8 — mirrors `v_course_risk`; the view stays the source of truth |
+| `risk.ts` | §8 — ranks the Today screen online and offline (ADR-0008); agrees tier for tier with `v_course_risk` |
 | `hebrew-calendar.ts` | §9 — dates, the Hebrew/Gregorian conversion, the unavailable-day calendar |
 | `templates.ts` | §14.2 — pure rendering; unknown variables render empty |
 
@@ -46,6 +46,14 @@ Both live in `hebrew-calendar.ts` and nowhere else, so both are contained if the
 
 ## If you change `risk.ts`, say so about `v_course_risk`
 
-The view in `schema.sql` is the source of truth and is owned by the `database` agent. The two must
-agree tier for tier and boundary for boundary; `risk.test.ts` and `schema.test.sql` are the two
-halves of that agreement.
+Since [ADR-0008](../../docs/adr/0008-today-risk-from-the-aggregate.md), `risk.ts` is the source of
+truth for the Today screen, online and offline: `lib/data/today.ts` hands it the aggregate the
+`today_screen` RPC returns, and the offline cache reaches it through `summariseCourse`. The view in
+`schema.sql` is the source of truth for the nightly job (§8.4) and is owned by the `database`
+agent. The two must agree tier for tier and boundary for boundary — a divergence now shows up as
+the nightly notification contradicting the morning screen — and `risk.test.ts` and
+`schema.test.sql` are the two halves of that agreement.
+
+One tier is still counted in SQL: `high`. `stale_cancellations` arrives pre-counted from the
+database online, and only offline does `summariseCourse` count it, so ADR-0008 accepts that `high`
+alone can differ across connectivity. Changing the 7-day threshold is a change in both places.

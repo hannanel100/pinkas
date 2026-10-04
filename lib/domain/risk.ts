@@ -1,12 +1,25 @@
 /**
  * The risk engine — SDD §8.
  *
- * `v_course_risk` (`supabase/migrations/`, last redefined in 0003) **is the
- * source of truth**; this module is a
- * pure mirror of it for offline use (§15) and for anything that already holds
- * the rows. The two must agree tier for tier and boundary for boundary — the
- * view is owned by the `database` agent, so a change to either is a change to
- * both, and saying so out loud is part of changing it.
+ * ADR-0008: **`assessRisk()` ranks the Today screen, online and offline
+ * alike.** Online, `lib/data/today.ts` feeds it the aggregate columns the
+ * `today_screen` RPC returns (never the view's verdict); offline (§15),
+ * `summariseCourse()` builds the same input from cached rows. One function
+ * either way, so the screen cannot change its answer when she loses signal.
+ * This module's fixture table is therefore a release gate for the home screen,
+ * not an offline convenience.
+ *
+ * `v_course_risk` (`supabase/migrations/`, last redefined in 0003) remains the
+ * source of truth for the nightly job (§8.4), which runs in-database and cannot
+ * call TypeScript. The two must agree tier for tier and boundary for boundary,
+ * or the nightly notification contradicts the screen she opens in the morning.
+ * The view is owned by the `database` agent, so a change to either is a change
+ * to both, and saying so out loud is part of changing it.
+ *
+ * One tier is not fully decided here: `high`. `stale_cancellations` is counted
+ * in SQL (inside `course_risk(p_today)`, 7-day threshold embedded) and arrives
+ * pre-counted online; only offline does {@link summariseCourse} count it.
+ * ADR-0008 accepts that `high` alone can still differ across connectivity.
  *
  * §8.3: the reason code is the feature. This module emits the code and its
  * operands, never a rendered sentence — the sentence is Hebrew and belongs to

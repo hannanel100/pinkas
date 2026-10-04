@@ -49,11 +49,14 @@ Two traps already paid for:
 ## The risk view
 
 `v_course_risk` computes risk **on read** so it can never be stale — there is no job whose failure
-leaves Today showing yesterday's truth. Keep the five tiers exactly as `docs/SDD.md` §8.1 specifies
-them, evaluated in order with the first match winning, and keep them in sync with the pure mirror
-in `lib/domain/risk.ts`. If you change a tier here, say so — the `domain` agent owns the other
-half. The nightly `pg_cron` job reads the same view and only drives notifications; two mechanisms,
-one source of truth.
+leaves Today showing yesterday's truth. Its role is narrower than it was (SDD §8.1, ADR-0008): it is
+the source of truth for the nightly `pg_cron` job, which only drives notifications, and the SQL half
+of the tier agreement `schema.test.sql` asserts. **The Today screen does not read its verdict** —
+`today_screen` returns the view's aggregate columns and `lib/domain/risk.ts` ranks them, so the
+screen gives the same answer online and offline. Keep the five tiers exactly as §8.1 specifies,
+first match wins, and in agreement with `risk.ts`; if you change a tier here, say so — the
+`domain` agent owns the other half. `stale_cancellations` is the one tier input still decided in
+SQL; changing its threshold changes the online screen directly.
 
 Emit `risk_reason_code`, never a rendered sentence. The sentence is Hebrew and lives in the
 translation layer.
